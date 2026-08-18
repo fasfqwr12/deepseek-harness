@@ -40,6 +40,7 @@ function classifyPiAiError(message: string): string {
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
+  if (/server_is_overloaded|\bservers?\s+(?:is|are)\s+(?:currently\s+)?overloaded\b|\boverloaded\b.*\btry again later\b|\btry again later\b.*\boverloaded\b/i.test(message)) return 'SERVER'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
