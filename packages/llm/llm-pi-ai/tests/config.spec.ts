@@ -19,8 +19,9 @@ const configWith = (model: Record<string, unknown>): (() => unknown) =>
   routeWith({ models: [{ id: 'm', ...model }] })
 
 describe('reasoning schema boundary', () => {
-  it('rejects a level pi-ai does not know at the write that produced it', () => {
-    expect(configWith({ reasoningEfforts: { ultra: 'x' } })).toThrow(/"off"/)
+  it('accepts Ultra and rejects unknown reasoning levels at the write that produced them', () => {
+    expect(configWith({ reasoningEfforts: { ultra: 'ultra' } })).not.toThrow()
+    expect(configWith({ reasoningEfforts: { extreme: 'x' } })).toThrow(/"off"/)
     expect(configWith({ reasoningEfforts: { high: 42 } })).toThrow()
   })
 

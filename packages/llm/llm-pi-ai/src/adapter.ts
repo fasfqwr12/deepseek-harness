@@ -30,6 +30,7 @@ import type {
   MutableModels,
   SimpleStreamOptions,
   ThinkingLevel,
+  ThinkingLevelMap,
 } from '@earendil-works/pi-ai'
 import {
   attributionHeaders,
@@ -50,6 +51,7 @@ import type {
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
+import type { PiAiThinkingLevel } from './catalog.ts'
 import { toPiContext } from './context.ts'
 import { toStreamChunks } from './stream.ts'
 
@@ -113,26 +115,62 @@ function profileOptions(
  */
 function describableReasoningLevel(
   model: Model<Api>,
-  effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
-): ModelThinkingLevel | undefined {
+  effort: ReasoningEffortIdType | PiAiThinkingLevel | undefined,
+): PiAiThinkingLevel | undefined {
   if (effort === undefined) return undefined
-  return getSupportedThinkingLevels(model).some(level => level === effort)
-    ? effort as ModelThinkingLevel
+  return supportedReasoningLevels(model).some(level => level === effort)
+    ? effort as PiAiThinkingLevel
     : undefined
 }
 
-/** Validate an explicit Harness/profile effort without invoking pi-ai's clamp. */
-function resolveReasoningLevel(
+/** pi-ai's canonical levels plus the runtime-supported Ultra extension. */
+function supportedReasoningLevels(model: Model<Api>): PiAiThinkingLevel[] {
+  const levels: PiAiThinkingLevel[] = [...getSupportedThinkingLevels(model)]
+  const map = model.thinkingLevelMap as ThinkingLevelMap & Partial<Record<'ultra', string | null>> | undefined
+  if (model.reasoning && map?.ultra !== undefined && map.ultra !== null && !levels.includes('ultra')) levels.push('ultra')
+  return levels
+}
+
+/**
+ * Preserve a manual effort through pi-ai's catalog clamp. The cloned model is
+ * request-local: automatic mode still uses the untouched catalog descriptor,
+ * while a manual choice gets one wire spelling and lets the upstream decide.
+ */
+function dispatchReasoning(
   model: Model<Api>,
-  effort: ReasoningEffortIdType | ModelThinkingLevel | undefined,
-): ModelThinkingLevel | undefined {
-  if (effort === undefined) return undefined
-  const supported = getSupportedThinkingLevels(model)
-  if (supported.some(level => level === effort)) return effort as ModelThinkingLevel
-  throw new LlmError(
-    `pi-ai provider "${model.provider}" model "${model.id}" does not support reasoning effort "${effort}"`,
-    'UNSUPPORTED_REASONING_EFFORT',
-  )
+  reasoning: ReasoningEffortIdType | PiAiThinkingLevel | undefined,
+): { model: Model<Api>; reasoning: ModelThinkingLevel | undefined } {
+  if (reasoning === undefined) return { model, reasoning: undefined }
+  if (reasoning === 'off') {
+    // Off means omit the reasoning field entirely. Do not send `off`, `none`,
+    // or enable thinking merely to represent the UI choice.
+    const { thinkingLevelMap: _ignoredThinkingLevelMap, ...withoutThinkingMap } = model
+    return {
+      model: { ...withoutThinkingMap, reasoning: false },
+      reasoning: undefined,
+    }
+  }
+  const sourceMap = model.thinkingLevelMap as ThinkingLevelMap & Partial<Record<string, string | null>> | undefined
+  // Manual selection is user-owned: never clamp or downgrade an explicitly
+  // selected effort based on catalog metadata. Keep the wire spelling local
+  // to this request and let the actual upstream accept or reject it.
+  const canonical = reasoning === 'ultra'
+    ? 'max'
+    : reasoning as ModelThinkingLevel
+  const declaredWire = sourceMap?.[reasoning]
+  const wire = typeof declaredWire === 'string' ? declaredWire : String(reasoning)
+  return {
+    model: {
+      ...model,
+      reasoning: true,
+      // Manual choices are explicit user requests. Keep the selected effort
+      // on the wire even when route metadata does not advertise the field;
+      // the upstream response is authoritative for acceptance.
+      compat: { ...(model.compat ?? {}), supportsReasoningEffort: true },
+      thinkingLevelMap: { ...model.thinkingLevelMap, [canonical]: wire },
+    },
+    reasoning: canonical,
+  }
 }
 
 /**
@@ -153,15 +191,15 @@ function resolveReasoningLevel(
  */
 function reasoningInfo(
   model: Model<Api>,
-  defaultLevel: ModelThinkingLevel | undefined,
+  defaultLevel: PiAiThinkingLevel | undefined,
 ): Pick<LlmResolvedModelInfo, 'reasoning'> | Record<string, never> {
   if (!model.reasoning) return {}
-  const levels = getSupportedThinkingLevels(model)
+  const levels = supportedReasoningLevels(model)
   return {
     reasoning: {
       efforts: levels.map(level => ({
         id: ReasoningEffortId(level),
-        name: `${level.charAt(0).toUpperCase()}${level.slice(1)}`,
+        name: level === 'xhigh' ? 'XHigh' : `${level.charAt(0).toUpperCase()}${level.slice(1)}`,
       })),
       ...defaultLevel === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultLevel) },
     },
@@ -285,10 +323,7 @@ export class PiAiAdapter extends LlmAdapter {
     const snapshot = this.current()
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
-    const reasoning = resolveReasoningLevel(
-      model,
-      options.reasoningEffort ?? profile.reasoning,
-    )
+    const dispatch = dispatchReasoning(model, options.reasoningEffort)
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
 
     const consumer = new AbortController()
@@ -310,8 +345,8 @@ export class PiAiAdapter extends LlmAdapter {
       const context = attachments === undefined
         ? toPiContext(options)
         : await toPiContext(options, attachments)
-      const events = snapshot.models.streamSimple(model, context, {
-        ...profileOptions(profile, reasoning, apiKey),
+      const events = snapshot.models.streamSimple(dispatch.model, context, {
+        ...profileOptions(profile, dispatch.reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },

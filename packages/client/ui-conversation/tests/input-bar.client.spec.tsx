@@ -205,6 +205,18 @@ function bench(over?: BenchOptions) {
 }
 
 describe('image draft rail', () => {
+  it('offers a clickable image chooser and forwards selected files', () => {
+    const addImages = vi.fn(() => null)
+    const { view } = bench({ addImages })
+    expect(view.getByRole('button', { name: '添加图片' })).toBeTruthy()
+    const input = view.container.querySelector<HTMLInputElement>('input[type="file"]')
+    if (input === null) throw new Error('image file input is missing')
+    const image = new File([Uint8Array.of(1, 2, 3)], 'picked.png', { type: 'image/png' })
+    fireEvent.change(input, { target: { files: [image] } })
+    expect(addImages).toHaveBeenCalledWith([image])
+    expect(input.value).toBe('')
+  })
+
   it('collects clipboard files while preserving text from a mixed paste', () => {
     const addImages = vi.fn(() => null)
     const { textarea, shell } = bench({ addImages })
@@ -344,6 +356,19 @@ describe('image draft rail', () => {
     cleanup()
     const unknown = bench({ promptError: attachmentError('ATTACHMENT_NOT_REFERENCED') })
     expect(unknown.view.getByRole('alert').textContent).toContain('图片发送失败（ATTACHMENT_NOT_REFERENCED）')
+    cleanup()
+    const bridge = bench({
+      promptError: {
+        op: 'send',
+        error: {
+          code: 'attachment-error',
+          message: 'vision-bridge: mock endpoint returned 401: unauthorized',
+          details: { reason: 'VISION_BRIDGE_FAILED' },
+        },
+      },
+    })
+    expect(bridge.view.getByRole('alert').textContent)
+      .toContain('vision-bridge: mock endpoint returned 401: unauthorized')
     cleanup()
     const other = bench({
       promptError: { op: 'send', error: { code: 'internal', message: 'boom', details: {} } },

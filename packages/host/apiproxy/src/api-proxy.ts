@@ -12,7 +12,7 @@ import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatu
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
 import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
@@ -187,6 +187,48 @@ async function durablePromptContent(ctx: Context, content: readonly PromptConten
   return blocks
 }
 
+/**
+ * A vision captioner the prompt admission may consult when a text-only model
+ * receives an image. Declared locally so the host need not depend on the
+ * vision-bridge package; the mounted service must implement this shape.
+ */
+interface VisionCaptionBridge {
+  describe(
+    input: { data: Uint8Array; mediaType: string; question?: string },
+    signal?: AbortSignal,
+  ): Promise<string>
+}
+
+/**
+ * Replace every image part in `content` with a text part carrying the vision
+ * model's description, so a text-only model consumes the image's content as
+ * text. Image bytes never reach the model.
+ * @param bridge - the mounted vision captioner.
+ * @param content - the original prompt parts (may mix text and image).
+ * @param signal - abandonment signal forwarded to the vision request.
+ * @returns prompt parts with images replaced by their textual descriptions.
+ */
+async function captionImagesWithBridge(
+  bridge: VisionCaptionBridge,
+  content: readonly PromptContentPart[],
+  signal: AbortSignal | undefined,
+): Promise<PromptContentPart[]> {
+  const out: PromptContentPart[] = []
+  for (const part of content) {
+    if (part.type !== 'image') {
+      out.push(part)
+      continue
+    }
+    const bytes = decodeBase64(part.data)
+    const text = await bridge.describe({ data: bytes, mediaType: part.mediaType }, signal)
+    out.push({
+      type: 'text',
+      text: `[Image${part.name ? ` ${part.name}` : ''} — described by vision model:]\n${text}`,
+    })
+  }
+  return out
+}
+
 /** Search durable content for an image reference, including nested tool results. */
 function imageBlockIn(content: unknown, match: (ref: ImageAttachmentRef) => boolean): ImageAttachmentRef | undefined {
   if (!Array.isArray(content)) return undefined
@@ -232,10 +274,6 @@ function imageInEvent(event: SessionEvent, match: (ref: ImageAttachmentRef) => b
 }
 
 /** True when the current model-visible surface contains an image. */
-function messagesHaveImage(messages: readonly { content: readonly ContentBlock[] }[]): boolean {
-  return messages.some(message => contentHasImage(message.content))
-}
-
 /** Resolve the first reference matching one opaque id. */
 function referencedImage(events: readonly SessionEvent[], attachmentId: string): ImageAttachmentRef | undefined {
   for (const event of events) {
@@ -1168,6 +1206,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           ...logged.reasoningEffort === undefined
             ? {}
             : { reasoningEffort: logged.reasoningEffort },
+          ...logged.retryOverride === undefined
+            ? {}
+            : { retryOverride: logged.retryOverride },
+          ...logged.imageMode === undefined ? {} : { imageMode: logged.imageMode },
+          ...logged.searchMode === undefined ? {} : { searchMode: logged.searchMode },
         }
       },
       set current(next: ModelSelection) {
@@ -1176,6 +1219,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       assembled: undefined,
     }
     installModelSelection(agent.ctx, selection)
+    agent.ctx.tools?.guard((exec) => {
+      if (exec.name !== 'web_search') return undefined
+      const mode = selection.current.searchMode ?? 'auto'
+      if (mode === 'native') {
+        return 'This conversation delegates web search to the upstream model; DSH web_search is disabled.'
+      }
+      if (mode === 'off') return 'Web search is disabled for this conversation.'
+      return undefined
+    })
     selections.set(agent, selection)
     return selection
   }
@@ -2280,36 +2332,27 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async selectModel(request) {
-        const { sessionId, provider, model, reasoningEffort } = request.payload
+        const { sessionId, provider, model, reasoningEffort, retryOverride, imageMode, searchMode } = request.payload
         const found = await agentFor(sessionId)
         if ('error' in found) return err(request, found.error)
         return serializeImageAdmission(found.agent, async () => {
           try {
-            const resolved = await ctx.llm.resolveCallConfig({
-              provider,
-              model,
-              ...reasoningEffort === undefined
-                ? {}
-                : { reasoningEffort: ReasoningEffortId(reasoningEffort) },
-            })
-            const pendingImage = [...found.agent.inbox.nextTurn, ...found.agent.inbox.nextStep]
-              .some(message => contentHasImage(message.content))
-            if (pendingImage || messagesHaveImage(found.agent.session.deriveMessages())) {
-              const info = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model)
-              if (info.inputModalities !== undefined && !info.inputModalities.includes('image')) {
-                return err(request, {
-                  code: 'model-unavailable',
-                  message: `Model "${resolved.model}" does not accept image input, but this session already contains images; select an image-capable model.`,
-                  details: { provider, model },
-                })
-              }
-            }
+            const info = await ctx.llm.resolveModelInfo(provider, model)
+            const selectedReasoningEffort = reasoningEffort === undefined
+              ? info.reasoning?.defaultEffort
+              : ReasoningEffortId(reasoningEffort)
             const selected: ModelSelection = {
-              provider: resolved.provider,
-              model: resolved.model,
-              ...resolved.reasoningEffort === undefined
+              provider: info.provider,
+              model: info.id,
+              ...selectedReasoningEffort === undefined
                 ? {}
-                : { reasoningEffort: resolved.reasoningEffort },
+                : { reasoningEffort: selectedReasoningEffort },
+              // 重试覆盖不经 resolveCallConfig 验证（非 adapter 参数），从请求透传
+              ...retryOverride === undefined
+                ? {}
+                : { retryOverride },
+              ...imageMode === undefined ? {} : { imageMode },
+              ...searchMode === undefined ? {} : { searchMode },
             }
             selectionFor(found.agent).current = selected
             try {
@@ -2482,18 +2525,51 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const hasImage = content.some(part => part.type === 'image')
         const admit = async (): Promise<RpcResponse<{ accepted: true }>> => {
           try {
+            let effectiveContent: readonly PromptContentPart[] = content
             if (hasImage) {
               const current = selectionFor(agent).current
-              const modelInfo = await ctx.llm.resolveModelInfo(current.provider, current.model)
-              if (modelInfo.inputModalities !== undefined && !modelInfo.inputModalities.includes('image')) {
+              const imageMode = current.imageMode ?? 'auto'
+              if (imageMode === 'off') {
                 return err(request, {
                   code: 'attachment-error',
-                  message: `Model "${current.model}" does not support image input.`,
-                  details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
+                  message: 'This conversation has image input disabled.',
+                  details: { reason: 'IMAGE_MODE_DISABLED' },
                 })
               }
+              const modelInfo = imageMode === 'auto'
+                ? await ctx.llm.resolveModelInfo(current.provider, current.model)
+                : undefined
+              const shouldBridge = imageMode === 'dsh'
+                || (imageMode === 'auto'
+                  && modelInfo?.inputModalities !== undefined
+                  && !modelInfo.inputModalities.includes('image'))
+              if (shouldBridge) {
+                // A text-only model cannot receive image bytes. When a vision
+                // bridge is mounted, caption each image into text so the model
+                // still consumes the image's content; otherwise refuse as before.
+                const bridge = (ctx as unknown as { get(name: string): unknown }).get('visionBridge') as
+                  | VisionCaptionBridge
+                  | undefined
+                if (bridge === undefined) {
+                  return err(request, {
+                    code: 'attachment-error',
+                    message: `Model "${current.model}" does not support image input.`,
+                    details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
+                  })
+                }
+                try {
+                  effectiveContent = await captionImagesWithBridge(bridge, content, undefined)
+                } catch (error: unknown) {
+                  const reason = error instanceof Error ? error.message : String(error)
+                  return err(request, {
+                    code: 'attachment-error',
+                    message: reason,
+                    details: { reason: 'VISION_BRIDGE_FAILED' },
+                  })
+                }
+              }
             }
-            const durable = await durablePromptContent(ctx, content)
+            const durable = await durablePromptContent(ctx, effectiveContent)
             const message: UserMessage = createUserMessage({ content: durable, source })
             if (mode === 'steer') agent.steer(message)
             else agent.followup(message)

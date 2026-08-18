@@ -66,6 +66,8 @@
 }
 
 .thinkBody {
+  max-height: min(480px, 42vh);
+  overflow: auto;
   padding: 4px 0 4px 22px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 14px;

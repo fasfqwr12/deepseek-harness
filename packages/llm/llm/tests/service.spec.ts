@@ -382,7 +382,6 @@ describe('LlmRuntime', () => {
           [Symbol.asyncIterator](): AsyncIterator<StreamChunk> {
             return {
               // Third-party adapters can reject with arbitrary values.
-              // oxlint-disable-next-line typescript/prefer-promise-reject-errors
               next: () => Promise.reject('plain provider failure'),
             }
           },
@@ -717,7 +716,7 @@ describe('LlmRuntime', () => {
       .rejects.toMatchObject({ code: 'INVALID_MODEL_REASONING' })
   })
 
-  it('rejects unsupported reasoning efforts without clamping', async () => {
+  it('preserves explicit reasoning efforts as opaque manual choices', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     ctx.llm.registerAdapter(['route'], new CatalogAdapter(
@@ -727,16 +726,18 @@ describe('LlmRuntime', () => {
       { model: { efforts: [{ id: ReasoningEffortId('ultra'), name: 'Ultra' }] } },
     ))
 
-    await expect(ctx.llm.resolveCallConfig({
+    const describedChoice = {
       provider: 'route',
       model: 'model',
       reasoningEffort: ReasoningEffortId('standard'),
-    })).rejects.toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
-    await expect(ctx.llm.resolveCallConfig({
+    }
+    await expect(ctx.llm.resolveCallConfig(describedChoice)).resolves.toEqual(describedChoice)
+    const undescribedChoice = {
       provider: 'route',
       model: 'plain',
       reasoningEffort: ReasoningEffortId('standard'),
-    })).rejects.toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
+    }
+    await expect(ctx.llm.resolveCallConfig(undescribedChoice)).resolves.toEqual(undescribedChoice)
   })
 
   it('resolves reasoning defaults at the final adapter boundary after routing middleware', async () => {

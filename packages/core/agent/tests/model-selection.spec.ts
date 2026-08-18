@@ -58,4 +58,30 @@ describe('installModelSelection()', () => {
     )).resolves.toBe(seed)
     await ctx.fiber.dispose()
   })
+
+  it('passes a session-level retryOverride through the assembled request', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+    const dispose = installModelSelection(ctx, selection)
+    const agent = {} as Agent
+    const signal = new AbortController().signal
+    const seed: LlmCallConfig = { provider: 'seed', model: 'seed', temperature: 0.2 }
+
+    const override = { maxRetries: 5, initialDelayMs: 2000 }
+    selection.current = { provider: 'gamma', model: 'g1', retryOverride: override }
+    await ctx.systemPrompt.assemble()
+    await expect(agentEvents(ctx, agent).waterfall(
+      'agent/request', { turn: 1, step: 0, signal }, () => Promise.resolve(seed),
+    )).resolves.toEqual({ provider: 'gamma', model: 'g1', retryOverride: override, temperature: 0.2 })
+
+    selection.current = { provider: 'gamma', model: 'g1', retryOverride: 'off' }
+    await ctx.systemPrompt.assemble()
+    await expect(agentEvents(ctx, agent).waterfall(
+      'agent/request', { turn: 1, step: 1, signal }, () => Promise.resolve(seed),
+    )).resolves.toEqual({ provider: 'gamma', model: 'g1', retryOverride: 'off', temperature: 0.2 })
+
+    dispose()
+    await ctx.fiber.dispose()
+  })
 })

@@ -158,7 +158,23 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     next: () => Promise<RequestErrorAction>,
   ): Promise<RequestErrorAction> {
     if (policy === undefined) return next()
-    if (policy.mode === 'always') {
+    // 会话级重试覆盖：requestHeader 是当前正在重试的请求组装时的快照，
+    // 所以这里读到的正是该请求生效的覆盖设置（随 request/header 持久化，重启后仍在）。
+    const override = agent.session.requestHeader()?.config.retryOverride
+    if (override === 'off') return next()
+    const effective: ResolvedRetryPolicy = override === undefined
+      ? policy
+      : policy.mode === 'normal'
+        ? Object.freeze({
+          ...policy,
+          ...override.maxRetries === undefined ? {} : { maxRetries: override.maxRetries },
+          ...override.initialDelayMs === undefined ? {} : { initialDelayMs: override.initialDelayMs },
+        })
+        : Object.freeze({
+          ...policy,
+          ...override.initialDelayMs === undefined ? {} : { initialDelayMs: override.initialDelayMs },
+        })
+    if (effective.mode === 'always') {
       if (signal.aborted || lifetime.signal.aborted) return
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
       // The loop and plugin lifetime stay open until delegated recovery settles.
@@ -174,11 +190,11 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
         return downstream.decision
       }
-    } else if (!policy.retryableCodes.includes(failure.code)) {
+    } else if (!effective.retryableCodes.includes(failure.code)) {
       return next()
     }
 
-    const policyKey = retryPolicyKey(policy)
+    const policyKey = retryPolicyKey(effective)
     const priorPolicyRetry = agent.session.events.findLast((event): event is SessionEvent<'llm/retry'> =>
       event.type === 'llm/retry'
       && event.data.turn === turn
@@ -187,24 +203,24 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       && event.data.policyKey === policyKey,
     )
     const previousRetry = priorPolicyRetry?.data.retry ?? 0
-    if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
+    if (effective.mode === 'normal' && previousRetry >= effective.maxRetries) return next()
     const retry = previousRetry + 1
     const retryId = priorPolicyRetry?.data.retryId ?? RetryId(randomUUID())
     let delayMs: number
     if (failure.providerRetryAfterMs !== undefined
       && Number.isFinite(failure.providerRetryAfterMs)
       && failure.providerRetryAfterMs > 0) {
-      if (failure.providerRetryAfterMs > policy.maxDelayMs) {
-        if (policy.mode === 'normal') return next()
-        delayMs = localDelay(policy, retry, random)
+      if (failure.providerRetryAfterMs > effective.maxDelayMs) {
+        if (effective.mode === 'normal') return next()
+        delayMs = localDelay(effective, retry, random)
       } else {
         delayMs = failure.providerRetryAfterMs
       }
     } else {
-      delayMs = localDelay(policy, retry, random)
+      delayMs = localDelay(effective, retry, random)
     }
 
-    return backoff(agent, turn, step, failure, provider, policy, policyKey, retry, retryId, delayMs, signal)
+    return backoff(agent, turn, step, failure, provider, effective, policyKey, retry, retryId, delayMs, signal)
   }
 
   const disposeListener = ctx.on('agent/request-error', (

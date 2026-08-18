@@ -64,10 +64,10 @@ export interface Config {
   apiKeyEnv?: string
   /** Endpoint base; falls back to $DEEPSEEK_BASE_URL from a trusted environment layer, then the public API. */
   baseURL?: string
-  /** Deployment thinking policy; `disabled` limits every conversation request to `off`. */
+  /** Automatic-mode thinking fallback; an explicit request effort takes precedence. */
   thinking?: 'enabled' | 'disabled'
   /** Default thinking effort (default `high`); `off` disables thinking per request. */
-  reasoningEffort?: 'off' | 'high' | 'max'
+  reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   /** Default per-request output cap (default 256,000); a model's own cap and explicit request values win. */
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value (default 1,000,000). */
@@ -92,7 +92,7 @@ export const Config: z<Config> = z.object({
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   baseURL: z.string(),
   thinking: z.union(['enabled', 'disabled']),
-  reasoningEffort: z.union(['off', 'high', 'max']),
+  reasoningEffort: z.union(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_TOKENS),
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
   models: z.array(catalogModel).default(DEFAULT_MODELS),
@@ -159,11 +159,6 @@ function resolveModels(models: readonly DeepSeekCatalogModel[] | undefined): Dee
  * @returns validated connection facts plus the credential reference.
  */
 export function resolveAdapterOptions(config: Config, environment?: LaunchEnvironmentSnapshot): ResolvedDeepSeekOptions {
-  if (config.thinking === 'disabled'
-    && config.reasoningEffort !== undefined
-    && config.reasoningEffort !== 'off') {
-    throw new Error('llm-deepseek: only reasoningEffort "off" can be configured when thinking is disabled')
-  }
   if (config.defaultContextWindow !== undefined
     && (!Number.isInteger(config.defaultContextWindow) || config.defaultContextWindow <= 0)) {
     throw new Error('llm-deepseek: defaultContextWindow must be a positive integer')

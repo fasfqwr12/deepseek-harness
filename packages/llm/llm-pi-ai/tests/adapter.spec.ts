@@ -110,8 +110,8 @@ describe('PiAiAdapter provider routing', () => {
     })
   })
 
-  it('uses a dynamic request effort and reports unsupported efforts before network I/O', async () => {
-    const server = await mockServer([{ events: textEvents }, { events: textEvents }])
+  it('sends every manual request effort and lets the upstream decide support', async () => {
+    const server = await mockServer([{ events: textEvents }, { events: textEvents }, { events: textEvents }])
     const ctx = await harness(server.url, { reasoning: 'max' })
 
     await assemble(ctx, {
@@ -126,19 +126,16 @@ describe('PiAiAdapter provider routing', () => {
       reasoningEffort: ReasoningEffortId('off'),
       messages: [],
     })
-    expect(server.requests[1]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(server.requests[1]).not.toHaveProperty('thinking')
     expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
 
-    const unsupported = await assemble(ctx, {
+    const manuallyTried = await assemble(ctx, {
       model: 'deepseek-v4-flash',
       reasoningEffort: ReasoningEffortId('xhigh'),
       messages: [],
     })
-    expect(unsupported.finish).toMatchObject({
-      kind: 'error',
-      failure: { code: 'UNSUPPORTED_REASONING_EFFORT' },
-    })
-    expect(server.requests).toHaveLength(2)
+    expect(manuallyTried.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[2]).toMatchObject({ reasoning_effort: 'xhigh' })
   })
 
   it('preserves omitted profile options when constructing the adapter directly', async () => {
@@ -444,7 +441,7 @@ describe('provider profile lifecycle', () => {
     expect((await ctx.llm.resolveModelInfo('openai', 'gpt-4.1')).reasoning).toBeUndefined()
   })
 
-  it('uses a supported profile reasoning value as the model default and rejects an unsupported one', async () => {
+  it('uses a supported profile default and omits an unsafe automatic default', async () => {
     const supported = new Context()
     await supported.plugin(LlmRuntime)
     await supported.plugin(LlmPiAi, {
@@ -453,11 +450,8 @@ describe('provider profile lifecycle', () => {
     await expect(supported.llm.resolveModelInfo('deepseek', 'deepseek-v4-flash'))
       .resolves.toMatchObject({ reasoning: { defaultEffort: ReasoningEffortId('max') } })
 
-    // A profile level this model cannot take DESCRIBES as no default rather
-    // than failing: resolveModelInfo builds the model catalog, and a catalog
-    // that throws takes its whole provider out of every picker — one mis-set
-    // field would hide every model on the route, including the ones that do
-    // support the level. The request path below is where it is refused.
+    // A profile level absent from the model metadata is not a safe automatic
+    // default. It remains absent from both the directory and resolved call.
     const unsupported = new Context()
     await unsupported.plugin(LlmRuntime)
     await unsupported.plugin(LlmPiAi, {
@@ -466,11 +460,9 @@ describe('provider profile lifecycle', () => {
     const described = await unsupported.llm.resolveModelInfo('deepseek', 'deepseek-v4-flash')
     expect(described.reasoning?.defaultEffort).toBeUndefined()
     expect(described.reasoning?.efforts.length).toBeGreaterThan(0)
-    await expect(assemble(unsupported, {
-      provider: 'deepseek', model: 'deepseek-v4-flash', messages: [],
-    })).resolves.toMatchObject({
-      finish: { kind: 'error', failure: { code: 'UNSUPPORTED_REASONING_EFFORT' } },
-    })
+    await expect(unsupported.llm.resolveCallConfig({
+      provider: 'deepseek', model: 'deepseek-v4-flash',
+    })).resolves.toEqual({ provider: 'deepseek', model: 'deepseek-v4-flash' })
 
     const disabled = new Context()
     await disabled.plugin(LlmRuntime)
@@ -515,9 +507,9 @@ describe('provider profile lifecycle', () => {
     })
   })
 
-  it('sends the declared wire spelling and refuses undeclared levels before network I/O', async () => {
+  it('sends declared wire spellings and also forwards undeclared manual levels', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
-    const server = await mockServer([{ events: textEvents }])
+    const server = await mockServer([{ events: textEvents }, { events: textEvents }])
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmPiAi, {
@@ -551,11 +543,50 @@ describe('provider profile lifecycle', () => {
       reasoningEffort: ReasoningEffortId('max'),
       messages: [],
     })
-    expect(undeclared.finish).toMatchObject({
-      kind: 'error',
-      failure: { code: 'UNSUPPORTED_REASONING_EFFORT' },
+    expect(undeclared.finish).toEqual({ kind: 'stop' })
+    expect(server.requests[1]).toMatchObject({ reasoning_effort: 'max' })
+  })
+
+  it('offers Max and Ultra independently to selectors', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          api: 'openai-completions',
+          baseURL: 'https://acme.test/v1',
+          models: [{
+            id: 'acme-ultra',
+            reasoningEfforts: { max: 'max', ultra: 'ultra' },
+          }],
+        },
+      },
     })
-    expect(server.requests).toHaveLength(1)
+    await expect(ctx.llm.resolveModelInfo('acme-gateway', 'acme-ultra')).resolves.toMatchObject({
+      reasoning: { efforts: [
+        { id: ReasoningEffortId('max'), name: 'Max' },
+        { id: ReasoningEffortId('ultra'), name: 'Ultra' },
+      ] },
+    })
+  })
+
+  it('sends Ultra as its declared wire spelling before provider I/O', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{ id: 'acme-ultra', reasoningEfforts: { ultra: 'ultra' } }],
+        },
+      },
+    })
+    await assemble(ctx, { provider: 'acme-gateway', model: 'acme-ultra', reasoningEffort: ReasoningEffortId('ultra'), messages: [] })
+    expect(server.requests[0]).toMatchObject({ reasoning_effort: 'ultra' })
   })
 
   it('dispatches the compat-switched dialect on a declared route', async () => {
@@ -592,11 +623,11 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[0]).toMatchObject({ thinking: { type: 'enabled' }, reasoning_effort: 'high' })
 
     await prompt('off')
-    expect(server.requests[1]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(server.requests[1]).not.toHaveProperty('thinking')
     expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
   })
 
-  it('sends a declared off value as the effort parameter instead of omitting it', async () => {
+  it('omits the reasoning parameter when Off is selected, even if a wire value is declared', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }])
     const ctx = new Context()
@@ -617,19 +648,17 @@ describe('provider profile lifecycle', () => {
       },
     })
 
-    // The adapter strips a selected Off to "no reasoning option", and pi-ai's
-    // dispatch reads thinkingLevelMap.off exactly then — so the declared value
-    // still reaches the wire, which is the README's promise for `off: none`.
+    // Off is a UI/request choice to omit the reasoning parameter entirely.
     await assemble(ctx, {
       provider: 'acme-gateway',
       model: 'acme-think',
       reasoningEffort: ReasoningEffortId('off'),
       messages: [],
     })
-    expect(server.requests[0]).toMatchObject({ reasoning_effort: 'none' })
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
   })
 
-  it('holds back reasoning_effort when the endpoint cannot take it', async () => {
+  it('forwards a manual reasoning_effort even when the endpoint does not advertise it', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }])
     const ctx = new Context()
@@ -657,7 +686,7 @@ describe('provider profile lifecycle', () => {
       reasoningEffort: ReasoningEffortId('high'),
       messages: [],
     })
-    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+    expect(server.requests[0]).toMatchObject({ reasoning_effort: 'high' })
   })
 
   it('accepts absent credentials for pi-ai ambient authentication', async () => {

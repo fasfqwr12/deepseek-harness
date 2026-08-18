@@ -48,6 +48,9 @@ describe('ReasoningRow', () => {
       />,
     )
     expect(view.getByText('运行中')).toBeTruthy()
+    // Live reasoning opens automatically; collapse it to exercise the legacy
+    // single-line summary and horizontal follow behavior.
+    fireEvent.click(view.getByText('Think'))
     const summary = view.getByText('Newest reasoning tokens')
     Object.defineProperties(summary, {
       scrollWidth: { configurable: true, value: 300 },
@@ -82,7 +85,7 @@ describe('ReasoningRow', () => {
     expect(summary.hasAttribute('data-follow-end')).toBe(false)
   })
 
-  it('expands from either Think or the reasoning summary', () => {
+  it('expands from either the reasoning title or summary', () => {
     const view = render(
       <AssistantMarkdown
         t={t}
@@ -100,7 +103,7 @@ describe('ReasoningRow', () => {
     expect(row.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('expanded Think drops the inline summary and renders plain prose, no IN card', () => {
+  it('expanded reasoning drops the inline summary and renders plain prose, no IN card', () => {
     const view = render(
       <AssistantMarkdown
         t={t}
@@ -113,5 +116,17 @@ describe('ReasoningRow', () => {
     expect(view.queryByText('IN')).toBeNull()
     expect(view.container.querySelector('[class*="ioCard"]')).toBeNull()
     expect(view.container.querySelector('[class*="thinkBody"]')).not.toBeNull()
+  })
+
+  it('starts a live reasoning stream expanded so intermediate text is visible', () => {
+    const view = render(
+      <AssistantMarkdown
+        t={t}
+        blocks={[{ kind: 'reasoning', text: '正在检查中间步骤' }]}
+        streaming
+      />,
+    )
+    expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('true')
+    expect(view.getByText('正在检查中间步骤')).toBeTruthy()
   })
 })

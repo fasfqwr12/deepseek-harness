@@ -145,11 +145,26 @@ export const sessionHistoryRequestSchema = z.object({
   maxMessages: z.number().int().positive().optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'session.history'>>>
 
+/** 会话级重试覆盖：'off' 关闭重试，或覆盖最大次数/初始间隔。 */
+export const retryOverrideSchema = z.union([
+  z.literal('off'),
+  z.object({
+    maxRetries: z.number().int().min(0).max(20).optional(),
+    initialDelayMs: z.number().int().min(100).max(60_000).optional(),
+  }),
+])
+
+/** User-controlled capability routing. Upstream behavior remains authoritative. */
+export const capabilityModeSchema = z.enum(['auto', 'native', 'dsh', 'off'])
+
 /** Complete provider/model selection. */
 export const modelSelectionSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string().min(1).optional(),
+  retryOverride: retryOverrideSchema.optional(),
+  imageMode: capabilityModeSchema.optional(),
+  searchMode: capabilityModeSchema.optional(),
 }) satisfies z.ZodType<Wire<ModelSelection>>
 
 /** One adapter-owned reasoning effort. */
@@ -260,6 +275,9 @@ export const sessionSelectModelRequestSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
   reasoningEffort: z.string().min(1).optional(),
+  retryOverride: retryOverrideSchema.optional(),
+  imageMode: capabilityModeSchema.optional(),
+  searchMode: capabilityModeSchema.optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'session.selectModel'>>>
 
 /** session.selectModel response value. */

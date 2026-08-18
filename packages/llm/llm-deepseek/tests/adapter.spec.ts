@@ -22,6 +22,18 @@ import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 import type { Behavior } from './mock-server.ts'
 
 const TEST_USER_ID = '00000000-0000-4000-8000-000000000001' as AnonymousUserId
+const REASONING_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+const ENABLED_REASONING_EFFORTS = REASONING_EFFORTS.filter(effort => effort !== 'off')
+const REASONING_DIRECTORY = [
+  { id: ReasoningEffortId('off'), name: 'Off' },
+  { id: ReasoningEffortId('minimal'), name: 'Minimal' },
+  { id: ReasoningEffortId('low'), name: 'Low' },
+  { id: ReasoningEffortId('medium'), name: 'Medium' },
+  { id: ReasoningEffortId('high'), name: 'High' },
+  { id: ReasoningEffortId('xhigh'), name: 'XHigh' },
+  { id: ReasoningEffortId('max'), name: 'Max' },
+  { id: ReasoningEffortId('ultra'), name: 'Ultra' },
+]
 let testHome: string
 
 beforeEach(() => {
@@ -141,49 +153,30 @@ describe('DeepSeekAdapter against a mock server', () => {
     expect(server.headers[0]?.['x-deepseek-harness-compact']).toBe('1')
   })
 
-  it('switches dynamically from the configured high default through off to max', async () => {
-    const server = await mockServer([
-      { kind: 'sse', events: textEvents },
-      { kind: 'sse', events: textEvents },
-      { kind: 'sse', events: textEvents },
-    ])
+  it('switches dynamically through all eight reasoning efforts', async () => {
+    const server = await mockServer(REASONING_EFFORTS.map(() => ({ kind: 'sse', events: textEvents })))
     const ctx = await harness(server.url, { thinking: 'enabled', reasoningEffort: 'high' })
 
-    await assemble(ctx,{
-      model: 'deepseek-v4-flash',
-      messages: [createUserMessage({
-        content: [{ type: 'text', text: 'hi' }],
-        source: { kind: 'plugin', plugin: 'test' },
-      })],
-    })
-    await assemble(ctx,{
-      model: 'deepseek-v4-flash',
-      reasoningEffort: ReasoningEffortId('off'),
-      messages: [createUserMessage({
-        content: [{ type: 'text', text: 'hi again' }],
-        source: { kind: 'plugin', plugin: 'test' },
-      })],
-    })
-    await assemble(ctx,{
-      model: 'deepseek-v4-flash',
-      reasoningEffort: ReasoningEffortId('max'),
-      messages: [createUserMessage({
-        content: [{ type: 'text', text: 'one more time' }],
-        source: { kind: 'plugin', plugin: 'test' },
-      })],
-    })
-    expect(server.requests[0]).toMatchObject({
-      thinking: { type: 'enabled' },
-      reasoning_effort: 'high',
-    })
-    expect(server.requests[1]).toMatchObject({
-      thinking: { type: 'disabled' },
-    })
-    expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
-    expect(server.requests[2]).toMatchObject({
-      thinking: { type: 'enabled' },
-      reasoning_effort: 'max',
-    })
+    for (const effort of REASONING_EFFORTS) {
+      await assemble(ctx, {
+        model: 'deepseek-v4-flash',
+        reasoningEffort: ReasoningEffortId(effort),
+        messages: [createUserMessage({
+          content: [{ type: 'text', text: `use ${effort}` }],
+          source: { kind: 'plugin', plugin: 'test' },
+        })],
+      })
+    }
+
+    for (const [index, effort] of REASONING_EFFORTS.entries()) {
+      if (effort === 'off') {
+        expect(server.requests[index]).not.toHaveProperty('thinking')
+        expect(server.requests[index]).not.toHaveProperty('reasoning_effort')
+      } else {
+        expect(server.requests[index]).toMatchObject({ thinking: { type: 'enabled' } })
+        expect(server.requests[index]).toHaveProperty('reasoning_effort', effort)
+      }
+    }
   })
 
   it('uses the configured maxTokens default and preserves an explicit request cap', async () => {
@@ -200,7 +193,7 @@ describe('DeepSeekAdapter against a mock server', () => {
     expect(server.requests[1]).toMatchObject({ max_tokens: 8_192 })
   })
 
-  it('publishes only off and omits the wire effort when thinking is disabled', async () => {
+  it('uses Off automatically and still publishes every manual effort when thinking is disabled', async () => {
     const server = await mockServer([{ kind: 'sse', events: textEvents }])
     const ctx = await harness(server.url, { thinking: 'disabled' })
 
@@ -211,21 +204,19 @@ describe('DeepSeekAdapter against a mock server', () => {
         source: { kind: 'plugin', plugin: 'test' },
       })],
     })
-    expect(server.requests[0]).toMatchObject({
-      thinking: { type: 'disabled' },
-    })
+    expect(server.requests[0]).not.toHaveProperty('thinking')
     expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash'))
       .resolves.toMatchObject({
         reasoning: {
-          efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }],
+          efforts: REASONING_DIRECTORY,
           defaultEffort: ReasoningEffortId('off'),
         },
       })
   })
 
-  it('reports a per-request effort failure before I/O when thinking is disabled', async () => {
-    const server = await mockServer([])
+  it('forwards a per-request effort when automatic thinking is disabled', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
     const ctx = await harness(server.url, { thinking: 'disabled' })
 
     const result = await assemble(ctx, {
@@ -236,17 +227,17 @@ describe('DeepSeekAdapter against a mock server', () => {
         source: { kind: 'plugin', plugin: 'test' },
       })],
     })
-    expect(result.finish).toMatchObject({
-      kind: 'error',
-      failure: { code: 'UNSUPPORTED_REASONING_EFFORT' },
+    expect(result.finish).toMatchObject({ kind: 'stop' })
+    expect(server.requests[0]).toMatchObject({
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'high',
     })
-    expect(server.requests).toHaveLength(0)
   })
 
-  it.each(['high', 'max'])(
-    'rejects direct adapter effort %s before I/O when thinking is disabled',
+  it.each(ENABLED_REASONING_EFFORTS)(
+    'forwards direct adapter effort %s when automatic thinking is disabled',
     async (effort) => {
-      const server = await mockServer([])
+      const server = await mockServer([{ kind: 'sse', events: textEvents }])
       const adapter = adapterOf({ apiKey: 'test-key', baseURL: server.url, thinking: 'disabled' })
 
       const stream = adapter.stream({
@@ -258,10 +249,11 @@ describe('DeepSeekAdapter against a mock server', () => {
           source: { kind: 'plugin', plugin: 'test' },
         })],
       })
-      await expect(async () => {
-        for await (const _chunk of stream) { /* drain */ }
-      }).rejects.toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
-      expect(server.requests).toHaveLength(0)
+      for await (const _chunk of stream) { /* drain */ }
+      expect(server.requests[0]).toMatchObject({
+        thinking: { type: 'enabled' },
+        reasoning_effort: effort,
+      })
     },
   )
 
@@ -669,17 +661,13 @@ describe('plugin registration and config', () => {
         context: { contextWindow: 1_000_000 },
         defaultMaxTokens: 256_000,
         reasoning: {
-          efforts: [
-            { id: ReasoningEffortId('off'), name: 'Off' },
-            { id: ReasoningEffortId('high'), name: 'High' },
-            { id: ReasoningEffortId('max'), name: 'Max' },
-          ],
+          efforts: REASONING_DIRECTORY,
           defaultEffort: ReasoningEffortId('high'),
         },
       })
   })
 
-  it.each(['off', 'max'] as const)('uses the configured %s reasoning default', async (effort) => {
+  it.each(REASONING_EFFORTS)('uses the configured %s reasoning default', async (effort) => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmDeepSeek, {
@@ -689,11 +677,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'unlisted-pass-through'))
       .resolves.toMatchObject({
         reasoning: {
-          efforts: [
-            { id: ReasoningEffortId('off'), name: 'Off' },
-            { id: ReasoningEffortId('high'), name: 'High' },
-            { id: ReasoningEffortId('max'), name: 'Max' },
-          ],
+          efforts: REASONING_DIRECTORY,
           defaultEffort: ReasoningEffortId(effort),
         },
       })
@@ -710,31 +694,33 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'unlisted-pass-through'))
       .resolves.toMatchObject({
         reasoning: {
-          efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }],
+          efforts: REASONING_DIRECTORY,
           defaultEffort: ReasoningEffortId('off'),
         },
       })
   })
 
-  it.each(['high', 'max'] as const)(
-    'rejects configured reasoning effort %s when thinking is disabled',
+  it.each(ENABLED_REASONING_EFFORTS)(
+    'uses configured reasoning effort %s when automatic thinking is disabled',
     async (reasoningEffort) => {
       const ctx = new Context()
       await ctx.plugin(LlmRuntime)
-      await expect(ctx.plugin(LlmDeepSeek, {
+      await ctx.plugin(LlmDeepSeek, {
         baseURL: 'http://127.0.0.1:1',
         thinking: 'disabled',
         reasoningEffort,
-      })).rejects.toThrow(/only reasoningEffort "off"/)
-      expect(ctx.llm.listProviders()).toEqual([])
+      })
+      await expect(ctx.llm.resolveModelInfo('deepseek-official', 'pass-through')).resolves.toMatchObject({
+        reasoning: { efforts: REASONING_DIRECTORY, defaultEffort: ReasoningEffortId(reasoningEffort) },
+      })
     },
   )
 
-  it.each(['high', 'max'] as const)(
-    'rejects disabled-thinking effort %s at the resolver boundary',
+  it.each(ENABLED_REASONING_EFFORTS)(
+    'accepts disabled-thinking effort %s at the resolver boundary',
     (reasoningEffort) => {
-      expect(() => resolveAdapterOptions({ thinking: 'disabled', reasoningEffort }))
-        .toThrow(/only reasoningEffort "off"/)
+      expect(resolveAdapterOptions({ thinking: 'disabled', reasoningEffort }).defaults.reasoningEffort)
+        .toBe(reasoningEffort)
     },
   )
 
@@ -742,7 +728,7 @@ describe('plugin registration and config', () => {
     const adapter = adapterOf({ thinking: 'disabled', reasoningEffort: 'off' })
     await expect(adapter.resolveModel('deepseek-official', 'pass-through')).resolves.toMatchObject({
       reasoning: {
-        efforts: [{ id: ReasoningEffortId('off'), name: 'Off' }],
+        efforts: REASONING_DIRECTORY,
         defaultEffort: ReasoningEffortId('off'),
       },
     })

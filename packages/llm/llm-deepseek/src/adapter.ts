@@ -93,17 +93,23 @@ export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_MAX_TOKENS = 256_000
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 const OFF_REASONING_EFFORT = ReasoningEffortId('off')
+const MINIMAL_REASONING_EFFORT = ReasoningEffortId('minimal')
+const LOW_REASONING_EFFORT = ReasoningEffortId('low')
+const MEDIUM_REASONING_EFFORT = ReasoningEffortId('medium')
 const HIGH_REASONING_EFFORT = ReasoningEffortId('high')
+const XHIGH_REASONING_EFFORT = ReasoningEffortId('xhigh')
 const MAX_REASONING_EFFORT = ReasoningEffortId('max')
+const ULTRA_REASONING_EFFORT = ReasoningEffortId('ultra')
 const REASONING_EFFORTS = [
   { id: OFF_REASONING_EFFORT, name: 'Off' },
+  { id: MINIMAL_REASONING_EFFORT, name: 'Minimal' },
+  { id: LOW_REASONING_EFFORT, name: 'Low' },
+  { id: MEDIUM_REASONING_EFFORT, name: 'Medium' },
   { id: HIGH_REASONING_EFFORT, name: 'High' },
+  { id: XHIGH_REASONING_EFFORT, name: 'XHigh' },
   { id: MAX_REASONING_EFFORT, name: 'Max' },
+  { id: ULTRA_REASONING_EFFORT, name: 'Ultra' },
 ] as const
-const OFF_ONLY_REASONING_EFFORTS = [
-  { id: OFF_REASONING_EFFORT, name: 'Off' },
-] as const
-
 function modelInfo(provider: string, model: DeepSeekCatalogModel): LlmModelInfo {
   return {
     provider,
@@ -191,23 +197,14 @@ export class DeepSeekAdapter extends LlmAdapter {
         : modelInfo(provider, configured),
       context: { contextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
-      ...connection.defaults.thinking === 'disabled'
-        ? {
-          reasoning: {
-            efforts: OFF_ONLY_REASONING_EFFORTS,
-            defaultEffort: OFF_REASONING_EFFORT,
-          },
-        }
-        : {
-          reasoning: {
-            efforts: REASONING_EFFORTS,
-            defaultEffort: connection.defaults.reasoningEffort === 'off'
-              ? OFF_REASONING_EFFORT
-              : connection.defaults.reasoningEffort === 'max'
-                ? MAX_REASONING_EFFORT
-                : HIGH_REASONING_EFFORT,
-          },
-        },
+      reasoning: {
+        efforts: REASONING_EFFORTS,
+        defaultEffort: connection.defaults.reasoningEffort === undefined
+          ? connection.defaults.thinking === 'disabled'
+            ? OFF_REASONING_EFFORT
+            : HIGH_REASONING_EFFORT
+          : ReasoningEffortId(connection.defaults.reasoningEffort),
+      },
     })
   }
 

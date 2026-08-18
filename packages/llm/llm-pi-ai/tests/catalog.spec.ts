@@ -614,6 +614,7 @@ describe('per-model reasoning efforts', () => {
     expect(model.thinkingLevelMap).toEqual({
       minimal: null,
       medium: null,
+      ultra: null,
       xhigh: null,
       low: 'low',
       high: 'high',
@@ -626,6 +627,14 @@ describe('per-model reasoning efforts', () => {
     const model = modelOf(declared([{ id: 'm', reasoningEfforts: { off: 'none', high: 'high' } }]))
     expect(model.thinkingLevelMap?.off).toBe('none')
     expect(getSupportedThinkingLevels(model)).toEqual(['off', 'high'])
+  })
+
+  it('preserves Max and Ultra as independent wire levels', () => {
+    const model = modelOf(declared([{
+      id: 'acme-ultra',
+      reasoningEfforts: { max: 'max', ultra: 'ultra' },
+    }]))
+    expect(model.thinkingLevelMap).toMatchObject({ max: 'max', ultra: 'ultra' })
   })
 
   it('offers exactly the declared keys: leaving off out makes thinking mandatory', () => {
@@ -659,14 +668,23 @@ describe('per-model reasoning efforts', () => {
     expect(getSupportedThinkingLevels(model)).toEqual(['off'])
   })
 
-  it('inherits the catalog capability when the field is absent', () => {
+  it('inherits the installed catalog capability when the field is absent', () => {
     const [catalogModel] = getBuiltinModels('deepseek')
     if (catalogModel === undefined) throw new Error('the installed catalog ships no deepseek model')
 
     const model = modelOf({ deepseek: { models: [{ id: catalogModel.id }] } }, 'deepseek')
 
     expect(model.reasoning).toBe(catalogModel.reasoning)
+    expect(getSupportedThinkingLevels(model)).toEqual(getSupportedThinkingLevels(catalogModel as Model<Api>))
     expect(model.thinkingLevelMap).toEqual(catalogModel.thinkingLevelMap)
+  })
+
+  it('does not invent reasoning capability for an unknown hand-declared model', () => {
+    const model = modelOf(declared([{ id: 'unknown-model' }]))
+
+    expect(model.reasoning).toBe(false)
+    expect(model.thinkingLevelMap).toBeUndefined()
+    expect(getSupportedThinkingLevels(model)).toEqual(['off'])
   })
 
   it('rejects a declaration that offers nothing or spells a level it cannot send', () => {

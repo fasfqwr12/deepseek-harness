@@ -41,7 +41,7 @@ export * from './message.ts'
 export * from './retry-policy.ts'
 export { BlockAssembler } from './assembler.ts'
 export { callConfigEquals, deepFreeze, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
-export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
+export type { CapabilityMode, LlmCallConfig, LlmCallConfigAdapterDefaults, RetryOverride } from './call-config.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -718,9 +718,9 @@ export class LlmRuntime extends Service {
   }
 
   /**
-   * Validate a conversation call config against its exact model capability and
-   * materialize adapter-configured defaults. Unsupported explicit efforts
-   * reject before provider I/O; no clamping or aliasing is performed. This
+   * Resolve a conversation call config against its exact model and materialize
+   * adapter-configured defaults. Explicit efforts remain opaque user choices:
+   * capability metadata informs automatic mode but never blocks a manual try. This
    * standalone query does not bind a later dispatch; use {@link prepareCall}
    * when logging and streaming must share one adapter registration.
    * @param config - provider/model route and optional request controls.
@@ -740,28 +740,10 @@ export class LlmRuntime extends Service {
     const defaulted = config.maxTokens === undefined && info.defaultMaxTokens !== undefined
       ? { ...config, maxTokens: info.defaultMaxTokens }
       : config
-    const reasoning = info.reasoning
-    const requested = defaulted.reasoningEffort
-    let resolvedConfig = defaulted
-    if (reasoning === undefined) {
-      if (requested !== undefined) {
-        throw new LlmError(
-          `provider "${config.provider}" model "${config.model}" does not support reasoning effort "${requested}"`,
-          'UNSUPPORTED_REASONING_EFFORT',
-        )
-      }
-    } else {
-      const effective = requested ?? reasoning.defaultEffort
-      if (effective !== undefined) {
-        if (!reasoning.efforts.some(effort => effort.id === effective)) {
-          throw new LlmError(
-            `provider "${config.provider}" model "${config.model}" does not support reasoning effort "${effective}"`,
-            'UNSUPPORTED_REASONING_EFFORT',
-          )
-        }
-        if (requested !== effective) resolvedConfig = { ...defaulted, reasoningEffort: effective }
-      }
-    }
+    const safeDefault = info.reasoning?.defaultEffort
+    const resolvedConfig = defaulted.reasoningEffort === undefined && safeDefault !== undefined
+      ? { ...defaulted, reasoningEffort: safeDefault }
+      : defaulted
     return {
       config: resolvedConfig,
       ...info.context === undefined ? {} : { context: info.context },

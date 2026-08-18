@@ -4,7 +4,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { LlmCallConfig, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { CapabilityMode, LlmCallConfig, ReasoningEffortId, RetryOverride } from '@deepseek-ai/dsh-llm'
 
 /** Complete provider, model, and optional reasoning effort selected for one live Agent. */
 export interface ModelSelection {
@@ -14,6 +14,12 @@ export interface ModelSelection {
   model: string
   /** Adapter-owned reasoning effort, or provider/default behavior when absent. */
   reasoningEffort?: ReasoningEffortId
+  /** 会话级重试覆盖；缺省沿用 provider 注册的重试策略。 */
+  retryOverride?: RetryOverride
+  /** Per-session image routing override. */
+  imageMode?: CapabilityMode
+  /** Per-session web-search routing override. */
+  searchMode?: CapabilityMode
 }
 
 /** Mutable model selection plus the value captured for the current step. */
@@ -57,14 +63,23 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
       const resolved = await next()
       const selected = selection.assembled
       if (selected === undefined) return resolved
-      const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved
+      const {
+        reasoningEffort: _inheritedEffort, retryOverride: _inheritedRetry,
+        imageMode: _inheritedImageMode, searchMode: _inheritedSearchMode,
+        ...withoutInherited
+      } = resolved
       return {
-        ...withoutInheritedEffort,
+        ...withoutInherited,
         provider: selected.provider,
         model: selected.model,
         ...selected.reasoningEffort === undefined
           ? {}
           : { reasoningEffort: selected.reasoningEffort },
+        ...selected.retryOverride === undefined
+          ? {}
+          : { retryOverride: selected.retryOverride },
+        ...selected.imageMode === undefined ? {} : { imageMode: selected.imageMode },
+        ...selected.searchMode === undefined ? {} : { searchMode: selected.searchMode },
       }
     },
   )

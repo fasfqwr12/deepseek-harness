@@ -96,6 +96,12 @@ export interface ModelSelection {
   model: string
   /** Adapter-owned reasoning effort; absence preserves adapter/provider default behavior. */
   reasoningEffort?: string
+  /** 会话级重试覆盖：'off' 关闭重试，或覆盖最大次数/初始间隔；缺省沿用 provider 策略。 */
+  retryOverride?: 'off' | { maxRetries?: number; initialDelayMs?: number }
+  /** 图片路由：自动、模型原生、DSH Vision 或关闭。 */
+  imageMode?: 'auto' | 'native' | 'dsh' | 'off'
+  /** 联网路由：自动、模型原生、DSH 搜索或关闭。 */
+  searchMode?: 'auto' | 'native' | 'dsh' | 'off'
 }
 
 /** One adapter-owned reasoning effort displayed for an exact model route. */
@@ -298,6 +304,9 @@ export interface SessionsApi {
     provider: string
     model: string
     reasoningEffort?: string
+    retryOverride?: 'off' | { maxRetries?: number; initialDelayMs?: number }
+    imageMode?: 'auto' | 'native' | 'dsh' | 'off'
+    searchMode?: 'auto' | 'native' | 'dsh' | 'off'
   }>):
   Promise<RpcResponse<{ selected: ModelSelection }>>
 

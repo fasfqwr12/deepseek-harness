@@ -14,18 +14,18 @@ import type { WireMessage, WireRequest, WireTool } from './types.ts'
 /** Adapter-level request defaults (from plugin config). */
 export interface RequestDefaults {
   thinking?: 'enabled' | 'disabled' | undefined
-  reasoningEffort?: 'off' | 'high' | 'max' | undefined
+  reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | undefined
 }
 
 interface ResolvedThinking {
   thinking?: 'enabled' | 'disabled'
-  reasoningEffort?: 'high' | 'max'
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 }
 
 /** Validate the adapter-owned effort before resolving its DeepSeek wire fields. */
-function reasoningEffort(effort: NonNullable<GenerateOptions['reasoningEffort']>): 'off' | 'high' | 'max' {
-  if (effort === 'off' || effort === 'high' || effort === 'max') {
-    return effort as 'off' | 'high' | 'max'
+function reasoningEffort(effort: NonNullable<GenerateOptions['reasoningEffort']>): 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' {
+  if (effort === 'off' || effort === 'minimal' || effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' || effort === 'max' || effort === 'ultra') {
+    return effort as 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   }
   throw new LlmError(
     `DeepSeek does not support reasoning effort "${effort}"`,
@@ -35,21 +35,17 @@ function reasoningEffort(effort: NonNullable<GenerateOptions['reasoningEffort']>
 
 /** Resolve one legal thinking/effort pair without exposing `off` as a wire effort. */
 function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): ResolvedThinking {
-  if (options.purpose === 'session-title') return { thinking: 'disabled' }
+  if (options.purpose === 'session-title') return {}
   const effort = options.reasoningEffort === undefined
     ? defaults.reasoningEffort
     : reasoningEffort(options.reasoningEffort)
-  if (defaults.thinking === 'disabled' && effort !== undefined && effort !== 'off') {
-    throw new LlmError(
-      `DeepSeek deployment does not support reasoning effort "${effort}"`,
-      'UNSUPPORTED_REASONING_EFFORT',
-    )
-  }
-  if (effort === 'off') return { thinking: 'disabled' }
-  if (effort === 'high' || effort === 'max') {
+  // Off is a wire omission, not a provider capability claim. Never send
+  // reasoning_effort, thinking, "off", "none", or thinking.disabled for it.
+  if (effort === 'off') return {}
+  if (effort !== undefined) {
     return { thinking: 'enabled', reasoningEffort: effort }
   }
-  return defaults.thinking === undefined ? {} : { thinking: defaults.thinking }
+  return defaults.thinking === 'enabled' ? { thinking: 'enabled' } : {}
 }
 
 /** Join the text blocks of a message (used for user/tool-result content). */

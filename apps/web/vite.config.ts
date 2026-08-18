@@ -146,6 +146,8 @@ export default defineConfig({
       { find: /^@deepseek-ai\/dsh-client-ui-attachment$/, replacement: src('../../packages/client/ui-attachment/src/index.ts') },
       { find: /^@deepseek-ai\/dsh-client-schema-form$/, replacement: src('../../packages/client/schema-form/src/index.ts') },
       { find: /^@deepseek-ai\/dsh-client-modules\/client$/, replacement: src('../../packages/client/modules/src/client/index.ts') },
+      { find: /^@deepseek-ai\/dsh-client-ui-model-selection\/client$/, replacement: src('../../packages/client/ui-model-selection/src/client/index.ts') },
+      { find: /^@deepseek-ai\/dsh-client-ui-model-selection$/, replacement: src('../../packages/client/ui-model-selection/src/index.ts') },
     ],
   },
   define: {

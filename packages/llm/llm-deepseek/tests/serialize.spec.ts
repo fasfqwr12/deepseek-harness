@@ -203,21 +203,24 @@ describe('serializeRequest', () => {
     expect(wire.tools).toBeUndefined()
   })
 
-  it('maps adapter-default thinking and the request reasoning effort', () => {
-    const wire = serializeRequest(
-      request({ messages: history, reasoningEffort: ReasoningEffortId('max') }),
-      { thinking: 'enabled', reasoningEffort: 'high' },
-    )
-    expect(wire.thinking).toEqual({ type: 'enabled' })
-    expect(wire.reasoning_effort).toBe('max')
-  })
+  it.each(['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const)(
+    'maps enabled reasoning effort %s to the wire',
+    (effort) => {
+      const wire = serializeRequest(
+        request({ messages: history, reasoningEffort: ReasoningEffortId(effort) }),
+        { thinking: 'enabled', reasoningEffort: 'high' },
+      )
+      expect(wire.thinking).toEqual({ type: 'enabled' })
+      expect(wire.reasoning_effort).toBe(effort)
+    },
+  )
 
-  it('maps off to disabled thinking without a wire reasoning effort', () => {
+  it('omits every thinking field for off', () => {
     const wire = serializeRequest(
       request({ messages: history, reasoningEffort: ReasoningEffortId('off') }),
       { thinking: 'enabled', reasoningEffort: 'max' },
     )
-    expect(wire.thinking).toEqual({ type: 'disabled' })
+    expect(wire.thinking).toBeUndefined()
     expect(wire.reasoning_effort).toBeUndefined()
   })
 
@@ -230,14 +233,16 @@ describe('serializeRequest', () => {
     expect(wire.reasoning_effort).toBe('max')
   })
 
-  it('rejects enabling thinking when the deployment is locked to disabled', () => {
-    expect(() => serializeRequest(
+  it('forwards a manual effort even when automatic mode is configured disabled', () => {
+    const wire = serializeRequest(
       request({ messages: history, reasoningEffort: ReasoningEffortId('high') }),
       { thinking: 'disabled' },
-    )).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_REASONING_EFFORT' }))
+    )
+    expect(wire.thinking).toEqual({ type: 'enabled' })
+    expect(wire.reasoning_effort).toBe('high')
   })
 
-  it('disables thinking for session-title requests without changing adapter defaults', () => {
+  it('omits thinking fields for session-title requests without changing adapter defaults', () => {
     const wire = serializeRequest(
       request({
         messages: history,
@@ -246,7 +251,7 @@ describe('serializeRequest', () => {
       }),
       { thinking: 'enabled', reasoningEffort: 'max' },
     )
-    expect(wire.thinking).toEqual({ type: 'disabled' })
+    expect(wire.thinking).toBeUndefined()
     expect(wire.reasoning_effort).toBeUndefined()
   })
 
@@ -262,10 +267,10 @@ describe('serializeRequest', () => {
     expect(wire.reasoning_effort).toBeUndefined()
   })
 
-  it('rejects an effort outside the DeepSeek capability', () => {
+  it('rejects an effort outside the eight-level DeepSeek capability', () => {
     expect(() => serializeRequest(request({
       messages: history,
-      reasoningEffort: ReasoningEffortId('medium'),
+      reasoningEffort: ReasoningEffortId('unsupported'),
     }))).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_REASONING_EFFORT' }))
   })
 })

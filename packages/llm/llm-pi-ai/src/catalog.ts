@@ -76,8 +76,11 @@ const THINKING_LEVEL_GATE: Record<ModelThinkingLevel, true> = {
   max: true,
 }
 
-/** Every pi-ai thinking level a profile may declare, in escalation order. */
-export const THINKING_LEVELS = Object.keys(THINKING_LEVEL_GATE) as readonly ModelThinkingLevel[]
+/** Harness reasoning levels accepted by this adapter, including the gateway-only Ultra extension. */
+export type PiAiThinkingLevel = ModelThinkingLevel | 'ultra'
+
+/** Every thinking level a profile may declare, in escalation order. */
+export const THINKING_LEVELS: readonly PiAiThinkingLevel[] = [...Object.keys(THINKING_LEVEL_GATE) as ModelThinkingLevel[], 'ultra']
 
 /** The `compat.thinkingFormat` spellings pi-ai accepts on an `openai-completions` model. */
 type PiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFormat']>
@@ -180,7 +183,7 @@ export function catalogModels(provider: string): Map<string, Model<Api>> {
  * absence; every other declared level must name a wire value. A level absent
  * from the dict is not offered.
  */
-export type PiAiReasoningEfforts = Partial<Record<ModelThinkingLevel, string | null>>
+export type PiAiReasoningEfforts = Partial<Record<PiAiThinkingLevel, string | null>>
 
 /**
  * Reasoning-dispatch compatibility switches, set on the route (its models'
@@ -319,12 +322,17 @@ function resolveModelReasoning(
 ): ModelReasoning {
   const efforts = entry.reasoningEfforts
   if (efforts === undefined) {
-    // Reasoning rides the installed entry or is absent: a bare capability flag
-    // would make pi-ai advertise effort levels with no `thinkingLevelMap` to
-    // spell them, and no listing endpoint reports a model's reasoning
-    // protocol. The entry's map (when any) arrives through the `...base`
-    // spread in the model literal.
-    return { reasoning: base?.reasoning ?? false }
+    // A catalog entry is the only source of inherited capability. A hand-
+    // declared model has no evidence that its endpoint accepts reasoning, so
+    // it must not gain a synthetic desktop-wide map merely because the UI has
+    // a common set of level buttons.
+    if (base === undefined) return { reasoning: false }
+    return {
+      reasoning: base.reasoning,
+      ...(base.thinkingLevelMap === undefined
+        ? {}
+        : { thinkingLevelMap: { ...base.thinkingLevelMap } }),
+    }
   }
   // The installed entry's map may ride along through `...base`; pi-ai never
   // reads it on a non-reasoning model, so stripping it is not worth a field
@@ -356,7 +364,7 @@ function resolveModelReasoning(
     invalid(provider, `model "${entry.id}" reasoningEfforts offers no level beyond "off"; declare a thinking`
       + ' level, or set reasoningEfforts to false for a non-reasoning model')
   }
-  const map: ThinkingLevelMap = {}
+  const map = {} as ThinkingLevelMap & Partial<Record<'ultra', string | null>>
   for (const level of THINKING_LEVELS) {
     const wire = efforts[level]
     if (wire === undefined) {

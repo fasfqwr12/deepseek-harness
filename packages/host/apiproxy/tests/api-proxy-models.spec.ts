@@ -19,6 +19,8 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import { CallId } from '@deepseek-ai/dsh-llm'
 import type { RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { createApiProxy } from '../src/api-proxy.ts'
@@ -85,6 +87,7 @@ async function harness(logged?: {
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, { persona: '' })
   await ctx.plugin(LlmRuntime)
+  await ctx.plugin(ToolRuntime)
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(AgentRegistry)
   ctx.llm.registerAdapter(['deepseek-official'], new CatalogAdapter('DeepSeek', [
@@ -126,6 +129,28 @@ function registerTextOnly(ctx: Context): void {
       return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text'] })
     }
   }('Text Only', []))
+}
+
+function registerImageCapable(ctx: Context): void {
+  ctx.llm.registerAdapter(['image-capable'], new class extends CatalogAdapter {
+    override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+      return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text', 'image'] })
+    }
+  }('Image Capable', []))
+}
+
+function installImageStore(ctx: Context): void {
+  ctx.provide('attachments', {
+    imageLimits: {
+      maxImageBytes: 1024, maxImagesPerMessage: 4, maxMessageImageBytes: 4096,
+      maxImagePixels: 1024, mediaTypes: ['image/png'],
+    },
+    validateImage: () => Promise.resolve(),
+    saveImage: (input: { data: Uint8Array; mediaType: 'image/png'; name?: string }) => Promise.resolve({
+      attachmentId: `att-${String(input.data[0])}`, mediaType: input.mediaType, bytes: input.data.byteLength,
+      width: 1, height: 1, ...input.name === undefined ? {} : { name: input.name },
+    }),
+  } as never)
 }
 
 describe('Web session model selection', () => {
@@ -196,7 +221,7 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
-  it('refuses a text-only selection while durable or pending image content remains visible', async () => {
+  it('allows a user-selected text-only route while durable or pending image content remains visible', async () => {
     const { ctx, agent, sessionId } = await harness()
     registerTextOnly(ctx)
     const api = createApiProxy(ctx, {
@@ -210,9 +235,9 @@ describe('Web session model selection', () => {
     agent.session.append('user/message', {
       id: 'image-message', role: 'user', source: { kind: 'user' }, content: [image],
     } as never, { surfaceOp: 'append' })
-    expect((await api.sessions.selectModel(request({
+    expect(expectValue(await api.sessions.selectModel(request({
       sessionId, provider: 'text-only', model: 'plain',
-    }))).result).toMatchObject({ ok: false, error: { code: 'model-unavailable' } })
+    }))).selected).toMatchObject({ provider: 'text-only', model: 'plain' })
 
     agent.session.append('user/message', {
       id: 'summary', role: 'user', source: { kind: 'plugin', plugin: 'compact' },
@@ -224,13 +249,193 @@ describe('Web session model selection', () => {
     ;(agent.inbox.nextTurn as UserMessage[]).push({
       id: 'pending-image', role: 'user', source: { kind: 'user' }, content: [image],
     } as never)
-    expect((await api.sessions.selectModel(request({
+    expect(expectValue(await api.sessions.selectModel(request({
       sessionId, provider: 'text-only', model: 'plain',
-    }))).result.ok).toBe(false)
+    }))).selected).toMatchObject({ provider: 'text-only', model: 'plain' })
     ;(agent.inbox.nextTurn as UserMessage[]).length = 0
     expect(expectValue(await api.sessions.selectModel(request({
       sessionId, provider: 'text-only', model: 'plain',
     }))).selected).toEqual({ provider: 'text-only', model: 'plain' })
+    await ctx.fiber.dispose()
+  })
+
+  it('bridges text-only image prompts and preserves vision API failures', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    registerTextOnly(ctx)
+    const describe = vi.fn(() => Promise.resolve('A blue square labelled TEST'))
+    ctx.provide('visionBridge', { describe } as never)
+    const followup = vi.fn()
+    Object.assign(agent, { followup })
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'text-only', model: 'plain' }),
+      cwd: '/tmp',
+    })
+
+    const accepted = await api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [
+        { type: 'text' as const, text: 'What is shown?' },
+        { type: 'image' as const, mediaType: 'image/png' as const, data: 'AQ==', name: 'test.png' },
+      ],
+    }))
+    expect(accepted.result.ok).toBe(true)
+    expect(describe).toHaveBeenCalledWith({
+      data: Uint8Array.of(1), mediaType: 'image/png',
+    }, undefined)
+    expect((followup.mock.calls[0]?.[0] as UserMessage).content).toEqual([
+      { type: 'text', text: 'What is shown?' },
+      { type: 'text', text: '[Image test.png — described by vision model:]\nA blue square labelled TEST' },
+    ])
+
+    describe.mockRejectedValueOnce(new Error('vision-bridge: mock endpoint returned 401: unauthorized'))
+    const rejected = await api.sessions.prompt(request({
+      sessionId,
+      mode: 'queue' as const,
+      content: [{ type: 'image' as const, mediaType: 'image/png' as const, data: 'Ag==' }],
+    }))
+    expect(rejected.result).toEqual({
+      ok: false,
+      error: {
+        code: 'attachment-error',
+        message: 'vision-bridge: mock endpoint returned 401: unauthorized',
+        details: { reason: 'VISION_BRIDGE_FAILED' },
+      },
+    })
+    expect(followup).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('forces DSH vision bridging even when the selected model declares image support', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    registerImageCapable(ctx)
+    const describe = vi.fn(() => Promise.resolve('forced caption'))
+    ctx.provide('visionBridge', { describe } as never)
+    const followup = vi.fn()
+    Object.assign(agent, { followup })
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'image-capable', model: 'vision', imageMode: 'dsh' }), cwd: '/tmp',
+    })
+
+    const response = await api.sessions.prompt(request({
+      sessionId, mode: 'queue' as const,
+      content: [{ type: 'image' as const, mediaType: 'image/png' as const, data: 'AQ==' }],
+    }))
+    expect(response.result.ok).toBe(true)
+    expect(describe).toHaveBeenCalledOnce()
+    expect((followup.mock.calls[0]?.[0] as UserMessage).content).toEqual([
+      { type: 'text', text: '[Image — described by vision model:]\nforced caption' },
+    ])
+    await ctx.fiber.dispose()
+  })
+
+  it('passes images through in native mode without local capability blocking or vision conversion', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    registerTextOnly(ctx)
+    installImageStore(ctx)
+    const describe = vi.fn(() => Promise.resolve('must not be used'))
+    ctx.provide('visionBridge', { describe } as never)
+    const followup = vi.fn()
+    Object.assign(agent, { followup })
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'text-only', model: 'plain', imageMode: 'native' }), cwd: '/tmp',
+    })
+
+    const response = await api.sessions.prompt(request({
+      sessionId, mode: 'queue' as const,
+      content: [{ type: 'image' as const, mediaType: 'image/png' as const, data: 'Ag==', name: 'raw.png' }],
+    }))
+    expect(response.result.ok).toBe(true)
+    expect(describe).not.toHaveBeenCalled()
+    expect((followup.mock.calls[0]?.[0] as UserMessage).content).toEqual([{
+      type: 'image', attachment: {
+        attachmentId: 'att-2', mediaType: 'image/png', bytes: 1, width: 1, height: 1, name: 'raw.png',
+      },
+    }])
+    await ctx.fiber.dispose()
+  })
+
+  it('passes images through in automatic mode when model capability is unknown', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    installImageStore(ctx)
+    const describe = vi.fn(() => Promise.resolve('must not be used'))
+    ctx.provide('visionBridge', { describe } as never)
+    const followup = vi.fn()
+    Object.assign(agent, { followup })
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat', imageMode: 'auto' }), cwd: '/tmp',
+    })
+
+    const response = await api.sessions.prompt(request({
+      sessionId, mode: 'queue' as const,
+      content: [{ type: 'image' as const, mediaType: 'image/png' as const, data: 'Aw==' }],
+    }))
+    expect(response.result.ok).toBe(true)
+    expect(describe).not.toHaveBeenCalled()
+    expect((followup.mock.calls[0]?.[0] as UserMessage).content[0]).toMatchObject({
+      type: 'image', attachment: { attachmentId: 'att-3' },
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects image input explicitly when the conversation image mode is off', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    const followup = vi.fn()
+    Object.assign(agent, { followup })
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat', imageMode: 'off' }), cwd: '/tmp',
+    })
+    const response = await api.sessions.prompt(request({
+      sessionId, mode: 'queue' as const,
+      content: [{ type: 'image' as const, mediaType: 'image/png' as const, data: 'BA==' }],
+    }))
+    expect(response.result).toMatchObject({
+      ok: false, error: { code: 'attachment-error', details: { reason: 'IMAGE_MODE_DISABLED' } },
+    })
+    expect(followup).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('allows DSH web_search in auto/dsh and rejects it in native/off with explicit reasons', async () => {
+    const { ctx, agent, sessionId } = await harness()
+    const executeSearch = vi.fn(() => Promise.resolve([{ type: 'text' as const, text: 'searched' }]))
+    ctx.tools.register(defineContentToolFixture({
+      name: 'web_search', description: 'test search', parameters: {}, execute: executeSearch,
+    }))
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }), cwd: '/tmp',
+    })
+    expectValue(await api.sessions.models(request({ sessionId })))
+
+    const run = () => ctx.tools.execute({
+      callId: CallId(`search-${String(executeSearch.mock.calls.length)}`), name: 'web_search', arguments: {},
+      signal: new AbortController().signal, agent,
+    })
+    for (const mode of ['auto', 'dsh'] as const) {
+      expectValue(await api.sessions.selectModel(request({
+        sessionId, provider: 'deepseek-official', model: 'deepseek-chat', searchMode: mode,
+      })))
+      const result = await run()
+      expect(result.isError).toBe(false)
+      expect(result.content).toEqual([{ type: 'text', text: 'searched' }])
+    }
+
+    expectValue(await api.sessions.selectModel(request({
+      sessionId, provider: 'deepseek-official', model: 'deepseek-chat', searchMode: 'native',
+    })))
+    const native = await run()
+    expect(native.isError).toBe(true)
+    expect(native.content).toEqual([{
+      type: 'text', text: 'Error: This conversation delegates web search to the upstream model; DSH web_search is disabled.',
+    }])
+
+    expectValue(await api.sessions.selectModel(request({
+      sessionId, provider: 'deepseek-official', model: 'deepseek-chat', searchMode: 'off',
+    })))
+    const off = await run()
+    expect(off.isError).toBe(true)
+    expect(off.content).toEqual([{ type: 'text', text: 'Error: Web search is disabled for this conversation.' }])
+    expect(executeSearch).toHaveBeenCalledTimes(2)
     await ctx.fiber.dispose()
   })
 
@@ -307,7 +512,7 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
-  it('accepts an advisory-unlisted model, rejects an unavailable provider, and switches only after the next assembly', async () => {
+  it('accepts advisory models and manual efforts, rejects an unavailable provider, and switches after assembly', async () => {
     const { ctx, agent, sessionId } = await harness()
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }), cwd: '/tmp' })
     const seed: LlmCallConfig = { provider: 'seed', model: 'seed', temperature: 0.2 }
@@ -343,18 +548,16 @@ describe('Web session model selection', () => {
       reasoningEffort: 'max',
     })
 
-    const unsupported = await api.sessions.selectModel(request({
+    const manual = expectValue(await api.sessions.selectModel(request({
       sessionId,
       provider: 'deepseek-official',
       model: 'private-preview',
       reasoningEffort: 'medium',
-    }))
-    expect(unsupported.result).toMatchObject({
-      ok: false,
-      error: {
-        code: 'model-unavailable',
-        message: 'provider "deepseek-official" model "private-preview" does not support reasoning effort "medium"',
-      },
+    })))
+    expect(manual.selected).toEqual({
+      provider: 'deepseek-official',
+      model: 'private-preview',
+      reasoningEffort: 'medium',
     })
 
     const rejected = await api.sessions.selectModel(request({
@@ -371,7 +574,7 @@ describe('Web session model selection', () => {
       },
     })
     expect(expectValue(await api.sessions.models(request({ sessionId }))).current)
-      .toEqual({ provider: 'deepseek-official', model: 'private-preview', reasoningEffort: 'max' })
+      .toEqual({ provider: 'deepseek-official', model: 'private-preview', reasoningEffort: 'medium' })
     await ctx.fiber.dispose()
   })
 

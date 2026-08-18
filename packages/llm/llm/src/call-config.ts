@@ -27,6 +27,26 @@ export interface LlmCallConfig {
   temperature?: number
   maxTokens?: number
   stop?: string[]
+  /**
+   * 会话级重试覆盖：'off' 关闭重试，或部分覆盖 provider 策略的次数/初始间隔。
+   * 随 request/header 持久化，llm-retry 在恢复点读取。
+   */
+  retryOverride?: RetryOverride
+  /** Session image routing: auto by model metadata, native pass-through, bridge caption, or disabled. */
+  imageMode?: CapabilityMode
+  /** Session web routing: auto/DSH expose local search, native/off suppress it. */
+  searchMode?: CapabilityMode
+}
+
+/** User-selected routing policy for image and web capabilities. */
+export type CapabilityMode = 'auto' | 'native' | 'dsh' | 'off'
+
+/** 会话级重试覆盖值：关闭重试，或覆盖最大次数与初始退避间隔。 */
+export type RetryOverride = 'off' | {
+  /** 覆盖 provider 策略的最大重试次数。 */
+  maxRetries?: number
+  /** 覆盖 provider 策略的初始退避间隔（毫秒）。 */
+  initialDelayMs?: number
 }
 
 /**
@@ -54,6 +74,8 @@ export function callConfigEquals(a: LlmCallConfig, b: LlmCallConfig): boolean {
     || a.temperature !== b.temperature
     || a.maxTokens !== b.maxTokens
   ) return false
+  if (a.retryOverride !== b.retryOverride) return false
+  if (a.imageMode !== b.imageMode || a.searchMode !== b.searchMode) return false
   if (a.stop === undefined || b.stop === undefined) return a.stop === b.stop
   return a.stop.length === b.stop.length && a.stop.every((s, i) => s === b.stop?.[i])
 }

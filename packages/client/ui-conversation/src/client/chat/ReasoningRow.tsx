@@ -25,7 +25,9 @@ function latestLine(text: string): string {
  * @returns the reasoning disclosure.
  */
 export function ReasoningRow({ text, running, t }: { text: string; running: boolean; t: ChatViewSlotProps['t'] }) {
-  const [expanded, setExpanded] = useState(false)
+  // A live provider reasoning stream is useful only when it is visible. Once
+  // mounted, keep the user's expanded/collapsed choice through settlement.
+  const [expanded, setExpanded] = useState(running)
   const summaryRef = useRef<HTMLSpanElement>(null)
   const summary = running ? latestLine(text) : firstLine(text)
   const scheduleSummaryScroll = useThrottledVisualUpdate(() => {

@@ -103,7 +103,8 @@ interface LiveRun {
  * receives a filesystem string so pkg's VFS Worker hook can resolve it.
  */
 /* v8 ignore next -- the './worker.cjs' arm is the built-lib world, unreachable unbuilt by construction; the built-lib e2e pins it. */
-const WORKER_PATH = fileURLToPath(new URL(new URL(import.meta.url).pathname.endsWith('.ts') ? './worker.ts' : './worker.cjs', import.meta.url))
+const IS_DEV = new URL(import.meta.url).pathname.endsWith('.ts')
+const WORKER_PATH = fileURLToPath(new URL(IS_DEV ? './worker.ts' : './worker.cjs', import.meta.url))
 
 /** Render an unknown thrown value as a message, `Error` or not. */
 function messageOf(error: unknown): string {
@@ -380,10 +381,10 @@ export class WorkerThreadCodeRuntime extends CodeRuntime {
       // Model code gets NO ambient environment — stronger than the scrubbed
       // env the defensive-patterns rule requires for spawned commands.
       env: {},
-      // Hermetic flags too: without this the worker inherits the host process's execArgv (a
-      // test runner's or tsx's loader hooks), which a bare isolate with an empty environment
-      // cannot satisfy.
-      execArgv: [],
+      // Hermetic flags: do NOT inherit the host process's execArgv (test runner/tsx hooks),
+      // but in dev mode we need --experimental-strip-types so the worker can load .ts source
+      // files directly (worker.ts uses only erasable-only syntax).
+      execArgv: IS_DEV ? ['--experimental-strip-types'] : [],
       resourceLimits: { maxOldGenerationSizeMb: this.config.maxOldGenerationSizeMb },
       // Backstop capture: the bootstrap patches JS-level writes into its own
       // ordered buffer, so these pipes normally stay silent; anything that

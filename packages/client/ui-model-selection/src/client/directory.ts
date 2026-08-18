@@ -102,6 +102,11 @@ export class ModelDirectory {
       ...selection.reasoningEffort === undefined
         ? {}
         : { reasoningEffort: selection.reasoningEffort },
+      ...selection.retryOverride === undefined
+        ? {}
+        : { retryOverride: selection.retryOverride },
+      ...selection.imageMode === undefined ? {} : { imageMode: selection.imageMode },
+      ...selection.searchMode === undefined ? {} : { searchMode: selection.searchMode },
     })
     if (this.disposed || generation !== this.generation) {
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
