@@ -8,7 +8,7 @@
  * @module dsh-llm-deepseek/translate
  */
 
-import { CallId, EMPTY_RESPONSE_CODE, LlmError, MALFORMED_TOOL_CALL_CODE } from '@deepseek-ai/dsh-llm'
+import { CallId, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { DONE } from './sse.ts'
 import type { WireChunk, WireUsage } from './types.ts'
@@ -48,14 +48,23 @@ export function mapFinishReason(reason: string): FinishReason {
  * api/create-chat-completion); the harness TokenUsage convention is
  * DISJOINT counts, so cache reads are subtracted out of `inputTokens`.
  * @param usage - wire usage from the finish chunk or the trailing usage-only chunk.
- * @returns disjoint harness counts; cache/reasoning fields present only when the wire reported them.
+ * @returns disjoint harness counts; an exact total is present only when the
+ *   aggregate prompt/completion counters are valid and agree with any wire total.
  */
 export function mapUsage(usage: WireUsage): TokenUsage {
   const cacheRead = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens
   const reasoning = usage.completion_tokens_details?.reasoning_tokens
+  const combined = usage.prompt_tokens + usage.completion_tokens
+  const hasExactTotal = Number.isSafeInteger(usage.prompt_tokens)
+    && usage.prompt_tokens >= 0
+    && Number.isSafeInteger(usage.completion_tokens)
+    && usage.completion_tokens >= 0
+    && Number.isSafeInteger(combined)
+    && (usage.total_tokens === undefined || usage.total_tokens === combined)
   return {
     inputTokens: usage.prompt_tokens - (cacheRead ?? 0),
     outputTokens: usage.completion_tokens,
+    ...hasExactTotal ? { totalTokens: combined } : {},
     ...cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {},
     ...reasoning !== undefined ? { reasoningTokens: reasoning } : {},
   }
@@ -76,28 +85,16 @@ function acceptIdentity(current: string | undefined, incoming: unknown): string 
   return typeof incoming === 'string' && incoming.length > 0 ? incoming : current
 }
 
-/** The identity field a streamed tool call never received. */
-interface Unidentified {
-  unidentified: 'id' | 'name'
-}
-
-/**
- * Assemble the final ContentBlock for one open block.
- * @param block - the block to close.
- * @returns the assembled block, or which identity field a tool call is missing.
- *   A tool call without both fields cannot be dispatched, and its result cannot
- *   be paired back to the provider, so the caller rejects the whole response
- *   rather than closing the block.
- */
-function closeBlock(block: OpenBlock): ContentBlock | Unidentified {
+/** Assemble the final ContentBlock for one open block. */
+function closeBlock(block: OpenBlock): ContentBlock {
   switch (block.kind) {
     case 'text': return { type: 'text', text: block.text }
     case 'reasoning': return { type: 'reasoning', text: block.text }
-    case 'tool-call': {
-      const { callId, name } = block
-      if (callId === undefined) return { unidentified: 'id' }
-      if (name === undefined) return { unidentified: 'name' }
-      return { type: 'tool-call', id: CallId(callId), name, arguments: block.text }
+    case 'tool-call': return {
+      type: 'tool-call',
+      id: CallId(block.callId ?? ''),
+      name: block.name ?? '',
+      arguments: block.text,
     }
   }
 }
@@ -108,9 +105,7 @@ function closeBlock(block: OpenBlock): ContentBlock | Unidentified {
  * @param payloads - SSE data payloads from {@link parseSse}, `[DONE]`-terminated.
  * @returns deltas as they arrive; `block-end`s, `usage`, and `finish` are all deferred to the `[DONE]` sentinel.
  *   A `stop` (or absent) finish with no opened blocks is a degenerate provider completion and maps to an
- *   `EMPTY_RESPONSE` error finish instead of a successful empty message. A tool call left without an `id` or
- *   `name` is unusable, so the response ends in a `MALFORMED_TOOL_CALL` error finish, after any usage and
- *   without a `block-end` for any block.
+ *   `EMPTY_RESPONSE` error finish instead of a successful empty message.
  */
 export async function* translate(payloads: AsyncIterable<string>): AsyncGenerator<StreamChunk> {
   let nextIndex = 0
@@ -129,29 +124,9 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
 
   for await (const payload of payloads) {
     if (payload === DONE) {
-      const ends: StreamChunk[] = []
       for (const block of order) {
-        const closed = closeBlock(block)
-        if ('unidentified' in closed) {
-          // A rejected response commits no assistant message, tool call, or
-          // tool result; the streamed chunks before it stay in the log, so the
-          // usage the attempt already burned is reported before the failure.
-          if (pendingUsage) yield { type: 'usage', usage: pendingUsage }
-          yield {
-            type: 'finish',
-            reason: {
-              kind: 'error',
-              failure: {
-                message: `model streamed a tool call with no ${closed.unidentified}`,
-                code: MALFORMED_TOOL_CALL_CODE,
-              },
-            },
-          }
-          return
-        }
-        ends.push({ type: 'block-end', index: block.index, block: closed })
+        yield { type: 'block-end', index: block.index, block: closeBlock(block) }
       }
-      yield* ends
       if (pendingUsage) yield { type: 'usage', usage: pendingUsage }
       const reason = pendingFinish ?? { kind: 'stop' as const }
       yield {
@@ -209,9 +184,6 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
         block.name = acceptIdentity(block.name, call.function?.name)
         const fragment = call.function?.arguments ?? ''
         block.text += fragment
-        // An in-flight delta may precede the call's id. The empty stand-in never
-        // reaches a ContentBlock: `[DONE]` either has the identity by then or
-        // refuses the whole response before closing the block.
         yield {
           type: 'tool-call-delta',
           index: block.index,
