@@ -10,6 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
 import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -38,6 +39,12 @@ export type { JsonlCompression } from './format.ts'
 
 const DEFAULT_PACK_CHUNKS = true
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
+/**
+ * Reverse-scan chunk size for the plaintext tail read: one positioned read
+ * per step, so only the chunks that hold the requested window enter memory
+ * instead of the whole log. Internal constant, not deployment configuration.
+ */
+const PLAINTEXT_TAIL_CHUNK_BYTES = 64 * 1024
 /**
  * Internal scheduling constant, not deployment configuration: balance
  * frame-boundary event-loop yields against `setImmediate` overhead. One frame
@@ -95,6 +102,67 @@ export const JsonlCompressionSchema: z<JsonlCompression> = z.union([
   z.const('zstd'),
   z.const('none'),
 ]).default(DEFAULT_COMPRESSION)
+
+/** Decode one complete JSONL event row; `undefined` on any parse failure. */
+function decodeTailLine(line: Buffer): SessionEvent[] | undefined {
+  try {
+    return decodeStorageRecord(JSON.parse(line.toString('utf8')))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Decode one reverse-scanned plaintext region into its events, oldest first.
+ * The region holds complete lines, each terminated by a newline except
+ * possibly the last (whose terminator a region to the right already
+ * consumed). Returns `undefined` on any unparsable row — the caller treats
+ * that as "the reverse scan cannot serve this window" and falls back to the
+ * whole-log read, whose error is authoritative.
+ */
+function decodeTailLines(body: Buffer): SessionEvent[] | undefined {
+  const events: SessionEvent[] = []
+  let lineStart = 0
+  for (;;) {
+    const newline = body.indexOf(0x0A, lineStart)
+    const end = newline === -1 ? body.length : newline
+    if (end > lineStart) {
+      const decoded = decodeTailLine(body.subarray(lineStart, end))
+      if (decoded === undefined) return undefined
+      events.push(...decoded)
+    }
+    if (newline === -1) return events
+    lineStart = newline + 1
+  }
+}
+
+/** Positional read that requires every requested byte, or fails loudly. */
+async function readExactly(handle: FileHandle, buffer: Buffer, position: number): Promise<void> {
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, position)
+  if (bytesRead !== buffer.length) {
+    throw new Error(`short read of session log at offset ${position}`)
+  }
+}
+
+/** Find the offset just past the last newline at or above `min`. */
+async function locateLastNewline(
+  handle: FileHandle,
+  size: number,
+  min: number,
+  signal?: AbortSignal,
+): Promise<number> {
+  let position = size
+  while (position > min) {
+    const readStart = Math.max(min, position - PLAINTEXT_TAIL_CHUNK_BYTES)
+    const chunk = Buffer.alloc(position - readStart)
+    await readExactly(handle, chunk, readStart)
+    signal?.throwIfAborted()
+    const index = chunk.lastIndexOf(0x0A)
+    if (index !== -1) return readStart + index + 1
+    position = readStart
+  }
+  return min
+}
 
 /** Plugin config: where the JSONL backend keeps its session logs, and the packed-row write switch. */
 export interface Config {
@@ -273,7 +341,9 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    * first event frame is reached), and return the newest events plus whether
    * anything older remains. A torn final frame is ignored, matching the
    * committed-prefix semantics of every other read. The plaintext encoding
-   * falls back to one whole stored-prefix read and slices the tail.
+   * reverse-scans whole lines from the file end (see
+   * {@link readPlaintextTail}); only a window the scan cannot serve falls
+   * back to one whole stored-prefix read.
    * @param id - persisted session id to resolve.
    * @param maxEvents - event budget for the window (pre-validated by the coordinator).
    * @param signal - optional cancellation for the read/decode work.
@@ -290,6 +360,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
     if (this.compression !== 'zstd') {
+      const tail = await this.readPlaintextTail(path, id, maxEvents, signal)
+      if (tail !== undefined) return tail
+      // A window the reverse scan cannot serve (corrupt rows inside it)
+      // falls back to the whole-log read, which reports the authoritative
+      // error and the same torn-tail semantics.
       const prefix = await this.readPrefix(path, id, signal)
       return {
         meta: prefix.meta,
@@ -351,6 +426,116 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const truncated = events.length > maxEvents
     if (truncated) events = events.slice(-maxEvents)
     return { meta, events, hasMore: truncated || windowStart > 1 }
+  }
+
+  /**
+   * Read the newest events of one plaintext JSONL log by scanning backwards
+   * from the file end: only the chunks that hold the requested window enter
+   * memory, not the whole log. Whole lines are collected from the end until
+   * the event budget is met or the header line is reached, under the same
+   * revision-stability retry as {@link readStableFile}. Returns `undefined`
+   * when the reverse scan cannot serve the window (corrupt rows), leaving
+   * the authoritative error and torn-tail handling to the whole-log read.
+   * @param path - the plaintext log file to scan.
+   * @param id - persisted session id the header must identify.
+   * @param maxEvents - event budget for the window.
+   * @param signal - optional cancellation for the read/decode work.
+   * @returns the header, the newest events, and whether older events exist.
+   */
+  private async readPlaintextTail(
+    path: string,
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined> {
+    for (;;) {
+      signal?.throwIfAborted()
+      const before = fileRevision(await stat(path, { bigint: true }))
+      signal?.throwIfAborted()
+      const tail = await this.scanPlaintextTail(path, id, maxEvents, signal)
+      signal?.throwIfAborted()
+      const after = fileRevision(await stat(path, { bigint: true }))
+      // An appending writer between the two stats means a torn read: retry.
+      if (before === after) return tail
+    }
+  }
+
+  /** One reverse line scan of a plaintext log; see {@link readPlaintextTail}. */
+  private async scanPlaintextTail(
+    path: string,
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined> {
+    const handle = await open(path, 'r')
+    try {
+      const { size } = await handle.stat()
+      signal?.throwIfAborted()
+      if (size === 0) throw new Error('empty or header-less session log')
+      // Header line first, bounded so one long line cannot allocate the file.
+      const headerProbe = Buffer.alloc(Math.min(size, PLAINTEXT_TAIL_CHUNK_BYTES))
+      await readExactly(handle, headerProbe, 0)
+      signal?.throwIfAborted()
+      const headerEnd = headerProbe.indexOf(0x0A)
+      if (headerEnd === -1) throw new Error('empty or header-less session log')
+      const meta = parseHeaderMeta(headerProbe.toString('utf8', 0, headerEnd))
+      if (meta === undefined) throw new Error(`corrupt session log: invalid header line in "${path}"`)
+      await this.assertStoredIdentity(path, meta, id, signal)
+      const bodyStart = headerEnd + 1
+      if (size <= bodyStart) return { meta, events: [], hasMore: false }
+      if (maxEvents === 0) return { meta, events: [], hasMore: true }
+      // Drop a torn final record: only bytes up to the file's last newline
+      // are committed (the same prefix semantics as the whole-log scanner).
+      const committedEnd = await locateLastNewline(handle, size, bodyStart, signal)
+      if (committedEnd <= bodyStart) return { meta, events: [], hasMore: false }
+      // Collect whole lines from the committed end backwards until the event
+      // budget is met or the header is reached. `carry` holds the bytes of a
+      // line whose beginning lies in the next (earlier) chunk; concatenated
+      // onto that earlier chunk it completes as that region's oldest line.
+      let events: SessionEvent[] = []
+      let carry: Buffer | undefined
+      let scanEnd = committedEnd
+      while (scanEnd > bodyStart && events.length < maxEvents) {
+        const readStart = Math.max(bodyStart, scanEnd - PLAINTEXT_TAIL_CHUNK_BYTES)
+        const chunk = Buffer.alloc(scanEnd - readStart)
+        await readExactly(handle, chunk, readStart)
+        signal?.throwIfAborted()
+        const region = carry === undefined ? chunk : Buffer.concat([chunk, carry])
+        const firstNewline = region.indexOf(0x0A)
+        carry = firstNewline === -1 ? region : region.subarray(0, firstNewline)
+        if (firstNewline !== -1) {
+          // Every segment after the first newline is one complete line:
+          // terminated inside this region, or by a newline the region to
+          // the right already consumed.
+          const regionEvents = decodeTailLines(region.subarray(firstNewline + 1))
+          if (regionEvents === undefined) return undefined
+          const regionLast = regionEvents.at(-1)
+          const head = events[0]
+          if (regionLast !== undefined && head !== undefined && regionLast.seq + 1 !== head.seq) {
+            return undefined
+          }
+          events = regionEvents.concat(events)
+        }
+        scanEnd = readStart
+      }
+      // The leftmost region starts at the first event line's boundary, so a
+      // carry left after a full scan is that line, complete.
+      if (scanEnd <= bodyStart && carry !== undefined && carry.length > 0) {
+        const finalEvents = decodeTailLines(carry)
+        if (finalEvents === undefined) return undefined
+        const finalLast = finalEvents.at(-1)
+        const head = events[0]
+        if (finalLast !== undefined && head !== undefined && finalLast.seq + 1 !== head.seq) {
+          return undefined
+        }
+        events = finalEvents.concat(events)
+      }
+      const truncated = events.length > maxEvents
+      if (truncated) events = events.slice(-maxEvents)
+      return { meta, events, hasMore: truncated || scanEnd > bodyStart }
+    } finally {
+      await handle.close()
+    }
   }
 
   /**

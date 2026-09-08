@@ -8,7 +8,7 @@ import { mkdir, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -124,6 +124,24 @@ const DEFAULT_MAX_MESSAGES = 50
  * common path while still bounding decode cost.
  */
 const DEFAULT_HISTORY_TAIL_EVENT_BUDGET = 10_000
+
+/**
+ * Widening rounds for one detached history read: while the current tail
+ * window cannot serve the requested page, each round re-reads the tail with
+ * a doubled event budget (budget * 2^k, k = 1..this cap) before the whole-log
+ * fallback ever runs. Bounded reverse reads replace the multi-MB whole-log
+ * inspection that used to fire whenever a page predates the default window.
+ */
+const TAIL_READ_MAX_CHUNK_ROUNDS = 8
+
+/**
+ * Idle auto-detach for agents this proxy attached: with no appended session
+ * event for this long, the agent's live world is disposed (the JSONL backend
+ * flushes on teardown, so the next prompt transparently resumes from
+ * storage). Attached state is a cache, not a commitment — this bounds the
+ * backend's memory when many large sessions were opened and abandoned.
+ */
+const DEFAULT_SESSION_IDLE_DETACH_MS = 30 * 60 * 1000
 
 /**
  * Non-model settings namespaces intentionally served to the Web client. The
@@ -711,12 +729,20 @@ export interface ApiProxyDefaults {
   coldBlankProbeMaxBytes?: number
   /**
    * Event budget for one detached history tail window. The history endpoint
-   * decodes only this many newest events for a cold session and falls back to
-   * a whole-log inspection whenever a requested page reaches beyond the
-   * window. `0` disables the tail path entirely. Defaults to
+   * decodes only this many newest events for a cold session and widens the
+   * window (see {@link TAIL_READ_MAX_CHUNK_ROUNDS}) whenever a requested page
+   * reaches beyond it, falling back to a whole-log inspection only past the
+   * widening cap. `0` disables the tail path entirely. Defaults to
    * {@link DEFAULT_HISTORY_TAIL_EVENT_BUDGET}.
    */
   historyTailEventBudget?: number
+  /**
+   * Idle auto-detach interval for agents this proxy attached (see
+   * {@link DEFAULT_SESSION_IDLE_DETACH_MS}). `0` detaches on every sweep
+   * (test-only); negative values disable the policy. Defaults to
+   * {@link DEFAULT_SESSION_IDLE_DETACH_MS}.
+   */
+  sessionIdleDetachMs?: number
   /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
@@ -1174,6 +1200,45 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
   const historyTailEventBudget = defaults.historyTailEventBudget
     ?? DEFAULT_HISTORY_TAIL_EVENT_BUDGET
+  const sessionIdleDetachMs = defaults.sessionIdleDetachMs
+    ?? DEFAULT_SESSION_IDLE_DETACH_MS
+  /**
+   * Detached cold tail reads are serialized (concurrency 1): the JSONL
+   * backend's degraded whole-file path holds one multi-MB buffer per
+   * in-flight read, so concurrent history reads of several large sessions
+   * would stack those peaks. One at a time bounds the backend footprint.
+   */
+  let coldTailReadChain: Promise<unknown> = Promise.resolve()
+  /** Handles (dispose capability) of agents this proxy created or resumed. */
+  const ownedAgents = new Map<SessionId, AgentHandle>()
+  /** Last appended-event time per attached session; drives idle auto-detach. */
+  const agentActivity = new Map<SessionId, number>()
+
+  /** Dispose attached agents that saw no appended event for the idle interval. */
+  function sweepIdleAgents(): void {
+    if (sessionIdleDetachMs < 0 || ownedAgents.size === 0) return
+    const now = Date.now()
+    for (const [id, handle] of ownedAgents) {
+      const last = agentActivity.get(id)
+      if (last === undefined || now - last < sessionIdleDetachMs) continue
+      // A running turn is never torn down; its own events refresh activity.
+      if (handle.agent.status !== 'idle') continue
+      ownedAgents.delete(id)
+      agentActivity.delete(id)
+      // Disposal aborts the agent's lifecycle, drains its final events into
+      // the JSONL log, and removes the session from the store — the next
+      // interaction resumes it from storage transparently.
+      void handle.dispose().catch((error: unknown) => {
+        ctx.logger.warn(`session "${id}": idle auto-detach failed: ${String(error)}`)
+      })
+    }
+  }
+
+  /** Record session activity and ride that moment to sweep idle agents. */
+  function touchSessionActivity(sessionId: SessionId): void {
+    agentActivity.set(sessionId, Date.now())
+    sweepIdleAgents()
+  }
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -1358,6 +1423,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     agentOptions,
     setup: async ({ meta, events }) =>
       (await composeAgent(resolveSessionPreset({ header: meta, events }))).setup,
+    // The resolver drops the resume handle; retaining it here gives the idle
+    // auto-detach sweep the dispose capability for resolver-attached agents.
+    onHandle: (handle) => {
+      ownedAgents.set(handle.agent.id, handle)
+      agentActivity.set(handle.agent.id, Date.now())
+    },
   })
 
   /** Send one transient frame to every connected mux consumer. */
@@ -1436,6 +1507,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       })),
     ]
   }
+
+  // Activity ledger for idle auto-detach: every appended event refreshes the
+  // owning session's timestamp, and the sweep rides these moments so a fully
+  // idle host needs no timers of its own (long-idle memory is the A5
+  // watchdog's job at the desktop-shell level).
+  ctx.on('session/event', (session: Session) => { touchSessionActivity(session.id) })
+  ctx.on('session/disposed', (session: Session) => {
+    ownedAgents.delete(session.id)
+    agentActivity.delete(session.id)
+  })
 
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'agent/inbox/spliced') return
@@ -1618,8 +1699,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * besides ensuring the composition; {@link historyCutOf} takes the cut.
    * A cold session first reads a bounded tail window (only the newest events
    * decoded — the Zstd backend decompresses just the header and tail frames),
-   * falling back to one whole-log inspection whenever the requested page
-   * cannot be served from the window.
+   * widening the window with doubled budgets while the requested page cannot
+   * be served from it, and falling back to one whole-log inspection only
+   * past the widening cap.
    * @param sessionId - the transcript being read.
    * @param beforeSeq - the page cut being requested (`undefined` = tail page).
    * @param maxMessages - the message quota the page must be able to fill.
@@ -1646,10 +1728,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   /**
    * One bounded detached tail window, or `undefined` when the requested page
    * cannot be served from it. A window that covers the whole stored log serves
-   * any page; a truncated window serves a tail page only while it can still
-   * fill the message quota (otherwise pagination would report `hasMore` false
-   * with older messages on disk) and a forward page only while its cut stays
-   * inside the window.
+   * any page; a truncated window serves a page only while that page fills the
+   * message quota — pagination's `hasMore` false from a truncated window would
+   * claim an older page empty while events remain on disk, and the client
+   * stops paging on it. While the window cannot serve the page, the budget
+   * doubles (bounded by {@link TAIL_READ_MAX_CHUNK_ROUNDS}) before this
+   * returns `undefined` to fall back to the whole-log read.
    * @param sessionId - the cold transcript being read.
    * @param beforeSeq - the page cut being requested (`undefined` = tail page).
    * @param maxMessages - the message quota the page must be able to fill.
@@ -1664,7 +1748,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     if (persistence === undefined) return undefined
     let tail: { meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }
     try {
-      tail = await persistence.readTail(sessionId, historyTailEventBudget)
+      for (let round = 0; round <= TAIL_READ_MAX_CHUNK_ROUNDS; round += 1) {
+        // Concurrency 1 for detached cold reads (see coldTailReadChain): the
+        // backend may hold one multi-MB buffer per in-flight read, so one at
+        // a time bounds the peak while the widening chain stays ordered.
+        const read = coldTailReadChain.then(() =>
+          persistence.readTail(sessionId, historyTailEventBudget * 2 ** round))
+        coldTailReadChain = read.then(() => undefined, () => undefined)
+        tail = await read
+        // A window covering the whole stored log serves any page: pagination's
+        // own `hasMore` is authoritative there.
+        if (!tail.hasMore) return { header: tail.meta, events: tail.events }
+        // A truncated window serves a page only while that page fills its
+        // quota — pagination's `hasMore` false here would hide older events
+        // the window never decoded, and the client stops paging on it.
+        if (paginate(tail.events, beforeSeq, maxMessages).hasMore) {
+          return { header: tail.meta, events: tail.events }
+        }
+        // The window still cannot serve this page; the next round doubles it.
+      }
     } catch (error: unknown) {
       // Not-found surfaces as the ordinary whole-log read's failure; every
       // other backend failure falls back to that same read rather than
@@ -1672,15 +1774,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       ctx.logger.warn(`history: tail window for "${sessionId}" failed (falling back to whole-log read): ${String(error)}`)
       return undefined
     }
-    if (!tail.hasMore) return { header: tail.meta, events: tail.events }
-    const headSeq = tail.events[0]?.seq
-    if (headSeq === undefined) return undefined
-    if (beforeSeq !== undefined) return beforeSeq > headSeq ? { header: tail.meta, events: tail.events } : undefined
-    // Tail page: `paginate` reporting `hasMore` false means the message quota
-    // is unfillable inside the window while older messages remain stored.
-    return paginate(tail.events, undefined, maxMessages).hasMore
-      ? { header: tail.meta, events: tail.events }
-      : undefined
+    return undefined
   }
 
   /**
@@ -1784,7 +1878,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (attached !== undefined && hasSubagentOwner(attached, live)) {
           throw new SubagentSessionOwnership(sessionId)
         }
-        if (live !== undefined) return live
+        if (live !== undefined) {
+          touchSessionActivity(sessionId)
+          return live
+        }
 
         const persistence = checkPersistedIdentity ? ctx.get('sessionPersistence') : undefined
         const stored = persistence === undefined
@@ -1809,11 +1906,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // session's history was produced under that composition, and
           // rebuilding it differently would replay tool calls the model can no
           // longer make.
-          return (await ctx.agents.resume({
+          const resume = await ctx.agents.resume({
             resumeSessionId: sessionId,
             agentOptions: agentOptions(),
             setup: (await composeAgent(storedPreset)).setup,
-          })).agent
+          })
+          ownedAgents.set(sessionId, resume)
+          touchSessionActivity(sessionId)
+          return resume.agent
         }
 
         try {
@@ -1822,7 +1922,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
         const composition = await composeAgent(presetId)
-        return (await ctx.agents.create({
+        const created = await ctx.agents.create({
           sessionId,
           agentOptions: agentOptions(),
           meta: {
@@ -1830,7 +1930,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
           },
           setup: composition.setup,
-        })).agent
+        })
+        ownedAgents.set(sessionId, created)
+        touchSessionActivity(sessionId)
+        return created.agent
       })().catch((error: unknown) => {
         // Another Host entry path may have published the same identity while
         // this operation crossed an asynchronous persistence/filesystem step.

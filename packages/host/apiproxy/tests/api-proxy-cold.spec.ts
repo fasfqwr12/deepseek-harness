@@ -16,7 +16,7 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import {
   PersistenceCoordinator,
   SessionPersistenceRevision,
@@ -797,5 +797,250 @@ describe('sessions.prompt synchronous rejection', () => {
         details: { reason: 'use subagent delivery for this child session' },
       })
     }
+  })
+})
+
+describe('detached history tail window', () => {
+  const sessionId = sid('session-tail-window')
+  const meta = header(sessionId, 1000)
+  const log: SessionEvent[] = Array.from({ length: 12 }, (_, seq) => ({
+    type: 'user/message',
+    seq,
+    time: 1000 + seq,
+    data: createUserMessage({ content: [{ type: 'text', text: `m${seq}` }], source: { kind: 'user' } }),
+    surfaceOp: 'append',
+  } as SessionEvent))
+
+  /** A well-formed tail backend: the newest `maxEvents` events plus `hasMore`. */
+  function slidingTail(): ReturnType<typeof vi.fn> {
+    return vi.fn(async (_id: SessionId, maxEvents: number) => ({
+      meta,
+      events: log.slice(-maxEvents),
+      hasMore: log.length > maxEvents,
+    }))
+  }
+
+  async function mount(budget: number, readTail: unknown, inspect: unknown) {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(UserQuestionService)
+    ctx.provide('sessionPersistence', {
+      list: () => Promise.resolve([meta]),
+      inspect,
+      readTail,
+      locate: () => undefined,
+    } as never)
+    return createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+      historyTailEventBudget: budget,
+    })
+  }
+
+  const pageSeqs = (page: { events: readonly { event: SessionEvent }[] }) =>
+    page.events.map(entry => entry.event.seq)
+
+  it('widens the budget until the tail page fills its quota without a whole-log read', async () => {
+    const readTail = slidingTail()
+    const inspect = vi.fn()
+    const api = await mount(4, readTail, inspect)
+
+    const page = await api.sessions.history(request({ sessionId, maxMessages: 10 }))
+    expect(page.result.ok).toBe(true)
+    if (!page.result.ok) throw new Error('unreachable')
+    // 4 events cannot fill 10 messages, 8 cannot either; 16 covers the whole
+    // log (hasMore false) and serves without inspecting. The full window's
+    // pagination is authoritative: 10 of 12 events leaves seqs 0..1 behind.
+    expect(readTail.mock.calls.map(([, maxEvents]) => maxEvents)).toEqual([4, 8, 16])
+    expect(inspect).not.toHaveBeenCalled()
+    expect(page.result.value.hasMore).toBe(true)
+    expect(pageSeqs(page.result.value)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+  })
+
+  it('widens for forward pages instead of serving a short hasMore=false window', async () => {
+    const readTail = slidingTail()
+    const inspect = vi.fn()
+    const api = await mount(4, readTail, inspect)
+
+    // Tail page: the 8-event window fills the quota, cut at seq 7.
+    const first = await api.sessions.history(request({ sessionId, maxMessages: 5 }))
+    expect(first.result.ok).toBe(true)
+    if (!first.result.ok) throw new Error('unreachable')
+    expect(pageSeqs(first.result.value)).toEqual([7, 8, 9, 10, 11])
+    expect(first.result.value.hasMore).toBe(true)
+    expect(readTail.mock.calls.map(([, maxEvents]) => maxEvents)).toEqual([4, 8])
+
+    // loadOlder(baseSeq=7): a 4-event window holds nothing before the cut, and
+    // the 8-event window holds only 3 messages — serving either would report
+    // hasMore false with seqs 0..3 still on disk, so the window widens to the
+    // whole log instead.
+    const second = await api.sessions.history(request({ sessionId, beforeSeq: 7, maxMessages: 5 }))
+    expect(second.result.ok).toBe(true)
+    if (!second.result.ok) throw new Error('unreachable')
+    expect(pageSeqs(second.result.value)).toEqual([2, 3, 4, 5, 6])
+    expect(second.result.value.hasMore).toBe(true)
+
+    const third = await api.sessions.history(request({ sessionId, beforeSeq: 2, maxMessages: 5 }))
+    expect(third.result.ok).toBe(true)
+    if (!third.result.ok) throw new Error('unreachable')
+    expect(pageSeqs(third.result.value)).toEqual([0, 1])
+    expect(third.result.value.hasMore).toBe(false)
+    expect(inspect).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the whole-log read past the widening cap', async () => {
+    // A pathological backend whose every window holds one event: no round can
+    // fill the quota, so the cap must stop the widening and inspect instead.
+    const readTail = vi.fn(async (_id: SessionId, _maxEvents: number) => ({ meta, events: [log[11]!], hasMore: true }))
+    const inspect = vi.fn(async () => ({ meta, events: log }))
+    const api = await mount(2, readTail, inspect)
+
+    const page = await api.sessions.history(request({ sessionId, maxMessages: 50 }))
+    expect(page.result.ok).toBe(true)
+    if (!page.result.ok) throw new Error('unreachable')
+    expect(readTail.mock.calls.map(([, maxEvents]) => maxEvents))
+      .toEqual([2, 4, 8, 16, 32, 64, 128, 256, 512])
+    expect(inspect).toHaveBeenCalledTimes(1)
+    expect(page.result.value.events).toHaveLength(12)
+    expect(page.result.value.hasMore).toBe(false)
+  })
+
+  it('falls back to the whole-log read when the tail read fails', async () => {
+    const readTail = vi.fn(async () => {
+      throw new Error('tail read exploded')
+    })
+    const inspect = vi.fn(async () => ({ meta, events: log }))
+    const api = await mount(4, readTail, inspect)
+
+    const page = await api.sessions.history(request({ sessionId, maxMessages: 50 }))
+    expect(page.result.ok).toBe(true)
+    if (!page.result.ok) throw new Error('unreachable')
+    expect(readTail).toHaveBeenCalledTimes(1)
+    expect(inspect).toHaveBeenCalledTimes(1)
+    expect(page.result.value.events).toHaveLength(12)
+  })
+
+  it('budget 0 disables the tail path entirely', async () => {
+    const readTail = vi.fn()
+    const inspect = vi.fn(async () => ({ meta, events: log }))
+    const api = await mount(0, readTail, inspect)
+
+    const page = await api.sessions.history(request({ sessionId, maxMessages: 5 }))
+    expect(page.result.ok).toBe(true)
+    if (!page.result.ok) throw new Error('unreachable')
+    expect(readTail).not.toHaveBeenCalled()
+    expect(inspect).toHaveBeenCalledTimes(1)
+    expect(pageSeqs(page.result.value)).toEqual([7, 8, 9, 10, 11])
+  })
+})
+
+describe('idle auto-detach', () => {
+  const wait = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+  /** The plain object behind the `as Agent` stub; its status is the sweep's gate. */
+  interface IdleStub {
+    id: SessionId
+    status: 'idle' | 'running'
+  }
+
+  interface IdleBench {
+    ctx: Context
+    api: ReturnType<typeof createApiProxy>
+    root: string
+    dispose: ReturnType<typeof vi.fn<() => Promise<void>>>
+    stubs: Map<SessionId, IdleStub>
+  }
+
+  async function mountIdle(idleMs: number): Promise<IdleBench> {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(UserQuestionService)
+    const root = mkdtempSync(join(tmpdir(), 'dsh-idle-'))
+    const api = createApiProxy(ctx, {
+      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+      cwd: '/tmp',
+      sessionIdleDetachMs: idleMs,
+    })
+    const dispose = vi.fn(() => Promise.resolve())
+    const stubs = new Map<SessionId, IdleStub>()
+    vi.spyOn(ctx.agents, 'create').mockImplementation(async (options) => {
+      const session = ctx.sessions.create(options.sessionId, options.meta === undefined ? {} : { meta: options.meta })
+      const stub: IdleStub & { session: Session; ctx: Context } = {
+        id: session.id, session, status: 'idle', ctx,
+      }
+      stubs.set(session.id, stub)
+      ctx.agents.register(stub as Agent)
+      return { agent: stub as Agent, dispose }
+    })
+    return { ctx, api, root, dispose, stubs }
+  }
+
+  async function createOwned(bench: IdleBench, id: string): Promise<Session> {
+    const response = await bench.api.sessions.create(request({ sessionId: sid(id), cwd: bench.root }))
+    expect(response.result.ok).toBe(true)
+    const session = bench.ctx.sessions.get(sid(id))
+    if (session === undefined) throw new Error('agent create was not invoked')
+    return session
+  }
+
+  /** A live Session the proxy does not own: its appends ride the sweep without owning anything. */
+  function bystanderFor(bench: IdleBench, id: string): Session {
+    return bench.ctx.sessions.create(sid(id), { meta: { cwd: '/proj' } })
+  }
+
+  it('keeps an owned agent while its own events refresh activity, then detaches it after the interval', async () => {
+    const bench = await mountIdle(20)
+    const session = await createOwned(bench, 'session-idle-owned')
+    expect(bench.dispose).not.toHaveBeenCalled()
+
+    // The agent's own appends ride the sweep as refreshes: even past the
+    // interval, its own activity keeps it attached.
+    await wait(40)
+    session.append('turn/start', { turn: 1 })
+    expect(bench.dispose).not.toHaveBeenCalled()
+
+    // A bystander session's activity sweeps OTHER sessions: the owned agent
+    // has now been idle longer than the interval and is detached.
+    const bystander = bystanderFor(bench, 'session-idle-bystander')
+    await wait(40)
+    bystander.append('turn/start', { turn: 1 })
+    await vi.waitFor(() => expect(bench.dispose).toHaveBeenCalledTimes(1))
+
+    // The ledger dropped the entry: later sweeps do not re-attempt disposal.
+    bystander.append('turn/start', { turn: 2 })
+    await wait(20)
+    expect(bench.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('never detaches a running agent, and detaches it once it goes idle', async () => {
+    const bench = await mountIdle(20)
+    const session = await createOwned(bench, 'session-idle-running')
+    const stub = bench.stubs.get(session.id)
+    if (stub === undefined) throw new Error('agent stub missing')
+    const bystander = bystanderFor(bench, 'session-idle-running-bystander')
+
+    // A running turn is never torn down, however long it stays silent.
+    stub.status = 'running'
+    await wait(40)
+    bystander.append('turn/start', { turn: 1 })
+    await wait(20)
+    expect(bench.dispose).not.toHaveBeenCalled()
+
+    // Once the turn ends, the next sweep disposes the long-idle agent.
+    stub.status = 'idle'
+    await wait(40)
+    bystander.append('turn/start', { turn: 2 })
+    await vi.waitFor(() => expect(bench.dispose).toHaveBeenCalledTimes(1))
+  })
+
+  it('a negative interval disables the sweep entirely', async () => {
+    const bench = await mountIdle(-1)
+    await createOwned(bench, 'session-idle-disabled')
+    const bystander = bystanderFor(bench, 'session-idle-disabled-bystander')
+    await wait(40)
+    bystander.append('turn/start', { turn: 1 })
+    await wait(20)
+    expect(bench.dispose).not.toHaveBeenCalled()
   })
 })
