@@ -82,7 +82,7 @@ describe('DeepSeekAdapter against a mock server', () => {
     })
     expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
     expect(result.finish).toEqual({ kind: 'stop' })
-    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1 })
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, totalTokens: 4 })
 
     // The wire request carried the auth header contents we configured.
     expect(server.requests[0]).toMatchObject({
@@ -638,6 +638,7 @@ describe('plugin registration and config', () => {
 
     expect(ctx.llm.providerRetryPolicy('deepseek-official')).toEqual({
       mode: 'always',
+      maxRetries: 2,
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0.2,

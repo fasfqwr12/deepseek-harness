@@ -141,6 +141,7 @@ describe('request-level dynamic configuration', () => {
     })
     expect(ctx.llm.providerRetryPolicy('deepseek-official')).toEqual({
       mode: 'always',
+      maxRetries: 2,
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0.2,

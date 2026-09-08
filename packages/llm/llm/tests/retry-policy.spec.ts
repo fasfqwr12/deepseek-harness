@@ -52,6 +52,7 @@ describe('provider retry policy', () => {
   it('resolves always mode with default backoff', () => {
     expect(resolveRetryPolicy({ mode: 'always' }, 'provider.retryPolicy')).toEqual({
       mode: 'always',
+      maxRetries: 2,
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
@@ -68,6 +69,7 @@ describe('provider retry policy', () => {
 
     expect(resolveRetryPolicy(layered, 'provider.retryPolicy')).toEqual({
       mode: 'always',
+      maxRetries: 5,
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
