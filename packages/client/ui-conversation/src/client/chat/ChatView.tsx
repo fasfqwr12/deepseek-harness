@@ -22,6 +22,8 @@ import { formatRunDuration } from './message-chrome.ts'
 import css from './ChatView.module.css'
 
 const FOLLOW_THRESHOLD = 24
+/** Reader-scroll distance from the head that arms auto-paging. */
+const TOP_PAGE_THRESHOLD = 48
 
 /** Active column host when present; otherwise the view-local scroller. */
 function scrollerOf(from: HTMLElement): HTMLElement {
@@ -296,6 +298,13 @@ export function ChatView({
     if (isAtBottom) chatScroll.save(null)
     else if (position !== null) chatScroll.save(position)
     observedTopRef.current = el.scrollTop
+    // Auto-page: reader scrolling near the head loads the previous page
+    // through the same anchored path as the button (anchor → prepend →
+    // compensation), so the button remains as fallback but is no longer
+    // the only trigger. loadingOlder serializes requests; the prepend
+    // compensation moves the reader off the threshold, so idling at the
+    // head does not re-fire.
+    if (hasMore && !loadingOlder && !isAtBottom && el.scrollTop <= TOP_PAGE_THRESHOLD) loadOlderAnchored()
   }
 
   // Bind the scroll listener on the resolved scrollport once per mount;

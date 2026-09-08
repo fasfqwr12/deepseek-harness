@@ -612,11 +612,12 @@ function LegacySessionMaybeEntry({ info, ...rest }: SessionMaybeEntryProps & { i
 }
 
 /**
- * Retained-session budget beside the live body: 1 live + 2 retained mounts.
+ * Retained-session budget beside the live body: 1 live + 4 retained mounts.
  * Bounds DOM and subscription cost of keep-alive while covering the recent
- * working set of a typical switch pattern (previous + next conversation).
+ * working set of a typical switch pattern (previous + next conversation,
+ * plus the middle sessions of fast multi-session triage).
  */
-const KEEP_ALIVE_RETAINED = 2
+const KEEP_ALIVE_RETAINED = 4
 
 /** One mounted session-maybe body: stable React key + the session it renders. */
 interface KeepAliveSlot {

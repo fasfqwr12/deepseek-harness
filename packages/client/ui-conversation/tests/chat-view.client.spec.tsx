@@ -1230,6 +1230,37 @@ describe('ChatView', () => {
     expect(view.getByText('加载中…')).toBeTruthy()
   })
 
+  it('reader scrolling near the head auto-pages through the anchored path', () => {
+    const h = makeHarness({ nodes: [user(5, 'later'), assistant(6, 'a')], hasMore: true })
+    const view = render(<h.ChatView {...h.props} />)
+    const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+    const metrics = installScrollMetrics(scroller, 1000, 400)
+    const anchored = view.container.querySelector('[data-chat-flow-key="fixture:user:5"]') as HTMLDivElement
+    let anchoredTop = 100
+    vi.spyOn(anchored, 'getBoundingClientRect').mockImplementation(
+      () => ({ top: anchoredTop, bottom: anchoredTop + 40 } as DOMRect),
+    )
+    // A reader travels from mid-content to the head; raw movement off the
+    // observed-top ledger is what arms the auto-page path.
+    readerScroll(scroller, 500)
+    expect(h.loadOlder).not.toHaveBeenCalled()
+    readerScroll(scroller, 0)
+    expect(h.loadOlder).toHaveBeenCalledTimes(1)
+    // Busy window: further near-head scrolls do not stack requests.
+    act(() => { h.set({ loadingOlder: true }) })
+    readerScroll(scroller, 5)
+    expect(h.loadOlder).toHaveBeenCalledTimes(1)
+    readerScroll(scroller, 0)
+    // The arriving page preserves the anchored row (same path as the button);
+    // the busy flag clears with the same update the prepend lands in.
+    metrics.setHeight(1600)
+    anchoredTop = 700
+    act(() => {
+      h.set({ loadingOlder: false, nodes: [user(1, 'old'), assistant(2, 'b'), user(5, 'later'), assistant(6, 'a')] })
+    })
+    expect(scroller.scrollTop).toBe(600) // reader offset 0 + the anchored row's 600px shift
+  })
+
   it('shows open error and loading states', () => {
     const h = makeHarness({
       openState: 'error',

@@ -1101,23 +1101,25 @@ describe('session-maybe keep-alive (multi-session hosts)', () => {
     expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(1)
   })
 
-  it('bounds the pool at three bodies and evicts least-recently-used sessions', () => {
+  it('bounds the pool at five bodies and evicts least-recently-used sessions', () => {
     const h = makeHost({ multiSession: true })
-    for (const id of ['s1', 's2', 's3', 's4']) h.addSession(id)
+    for (const id of ['s1', 's2', 's3', 's4', 's5', 's6']) h.addSession(id)
     const { view } = mountMaybeBodies(h)
     act(() => { h.current.set('s1') })
     act(() => { h.current.set('s2') })
     act(() => { h.current.set('s3') })
-    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(3)
     act(() => { h.current.set('s4') })
+    act(() => { h.current.set('s5') })
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(5)
+    act(() => { h.current.set('s6') })
     // Budget held: s1 (LRU tail) evicted — its body unmounted.
-    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(3)
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(5)
     expect(wrapper(view, 's1')).toBeNull()
     expect(wrapper(view, 's2')).not.toBeNull()
     act(() => { h.current.set('s1') })
-    // The evicted session comes back FRESH: a new mount ordinal (#5 after
-    // blank#1→adopted, s2#2, s3#3, s4#4).
-    expect(view.container.querySelector('[data-body="s1#5"]')).not.toBeNull()
+    // The evicted session comes back FRESH: a new mount ordinal (#7 after
+    // blank#1→adopted, s2#2 … s6#6).
+    expect(view.container.querySelector('[data-body="s1#7"]')).not.toBeNull()
   })
 
   it('drops to a fresh blank body on session loss while retained sessions survive, then promotes one', () => {
