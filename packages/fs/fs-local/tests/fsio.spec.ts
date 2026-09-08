@@ -763,6 +763,48 @@ describe('writeFileAtomic — temp-file safety', () => {
     expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
   })
 
+  it('falls back to claim-and-rename when the hard-link primitive is unavailable', async () => {
+    const file = join(dir, 'a.txt')
+    const unavailable = Object.assign(new Error('illegal operation on a directory'), { code: 'EISDIR' })
+
+    await writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw unavailable },
+    }, { displayPath: file })
+
+    expect(await readFile(file, 'utf8')).toBe('ours')
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('preserves a concurrent creator when falling back from an unavailable hard link', async () => {
+    const file = join(dir, 'a.txt')
+    const unavailable = Object.assign(new Error('illegal operation on a directory'), { code: 'EISDIR' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      inspectTemp: async () => { await writeFile(file, 'competitor') },
+      linkFile: async () => { throw unavailable },
+    }, { displayPath: file })).rejects.toMatchObject({
+      code: 'FS_NOT_OBSERVED',
+      message: `cannot overwrite existing "${file}" without reading it first`,
+    })
+    expect(await readFile(file, 'utf8')).toBe('competitor')
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('maps a non-regular fallback claim target through the guarded taxonomy', async () => {
+    const file = join(dir, 'a.txt')
+    const unavailable = Object.assign(new Error('illegal operation on a directory'), { code: 'EISDIR' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      inspectTemp: async () => { await mkdir(file) },
+      linkFile: async () => { throw unavailable },
+    }, { displayPath: file })).rejects.toMatchObject({
+      code: 'FS_NOT_REGULAR_FILE',
+      message: `cannot write "${file}": not a regular file`,
+    })
+    expect((await stat(file)).isDirectory()).toBe(true)
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
   it('maps a guarded-create target-inspection failure and cleans staging', async () => {
     const file = join(dir, 'a.txt')
     const linkFailure = Object.assign(new Error('link failed'), { code: 'EIO' })

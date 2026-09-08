@@ -141,20 +141,39 @@ export interface SessionProviderProps {
 }
 
 /**
- * Framework-wired session area: subscribes to the host's current provide
- * source and remounts the body under `key={sessionId}` so a session switch
- * rebuilds the session subtree. This dependency-inverted layer uses plain
- * string ids; `PropsRuntime` applies the branded type at the component
- * boundary.
+ * Framework-wired session area: remounts the body under `key={sessionId}` so
+ * a session switch rebuilds the session subtree. Reads the BINDING context,
+ * not the host's current source: at the root that is the same current-session
+ * projection, while inside a keep-alive retained body (SessionBindingScope)
+ * it is THAT session's pinned bundle — the strict session area of a hidden
+ * retained session renders its own session, never the newly selected one.
+ * This dependency-inverted layer uses plain string ids; `PropsRuntime`
+ * applies the branded type at the component boundary.
  */
 export function SessionProvider({ empty, children }: SessionProviderProps) {
-  const host = useHost()
-  const info = observableHook(host.sessions.provideInfo)(s => s)
+  // Detached-from-renderer guard only: the host itself is not needed here
+  // (the bundle arrives through the binding context).
+  useHost()
+  const info = useSessionMaybeProvideInfo()
   const id = info.sessionId
   if (id === undefined) return <>{empty?.() ?? null}</>
   return (
     <BindingContext.Provider value={info} key={id}>
       {children(id)}
+    </BindingContext.Provider>
+  )
+}
+
+/**
+ * Pin one session's provide bundle for a keep-alive subtree: scoped-slots'
+ * multi-session rendering wraps each retained session body in this scope so
+ * nested outlets and strict entries read THAT session's bundle instead of
+ * the root's current-selection projection.
+ */
+export function SessionBindingScope({ info, children }: { info: SessionMaybeProvideInfo; children: ReactNode }) {
+  return (
+    <BindingContext.Provider value={info}>
+      {children}
     </BindingContext.Provider>
   )
 }

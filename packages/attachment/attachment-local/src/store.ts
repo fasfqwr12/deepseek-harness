@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { chmod, link, mkdir, open, readFile, unlink } from 'node:fs/promises'
+import { chmod, link, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { dirname, join, parse, resolve } from 'node:path'
 import {
   AttachmentError,
@@ -21,6 +21,34 @@ const durableHomes = new Set<string>()
 
 function digest(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex')
+}
+
+function isEexist(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'EEXIST'
+}
+
+/**
+ * Errnos that cannot describe a real `link()` outcome here: the staging file
+ * was just written by this process and the target is content-addressed, so a
+ * missing target plus these codes means the hard-link primitive itself is
+ * unavailable — a kernel filter driver (e.g. a transparent-encryption
+ * minifilter) rejects CreateHardLinkW with a mapped EISDIR, and FAT-style
+ * filesystems return EPERM/ENOSYS/EOPNOTSUPP for links. EACCES is excluded: a
+ * denial stays a denial.
+ */
+function isLinkUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error) || !('code' in error)) return false
+  const code = (error as Error & { code?: string }).code
+  return code === 'EISDIR' || code === 'EPERM' || code === 'ENOSYS'
+    || code === 'EOPNOTSUPP' || code === 'ENOTSUP' || code === 'EINVAL' || code === 'EXDEV'
+}
+
+/** Dedup guard: an object stored under a digest name must match that digest. */
+async function verifyStoredObject(target: string, sha256: string): Promise<void> {
+  const existing = new Uint8Array(await readFile(target))
+  if (digest(existing) !== sha256) {
+    throw new AttachmentError('Stored attachment failed integrity verification.', 'ATTACHMENT_CORRUPT')
+  }
 }
 
 function displayName(value: string | undefined): string | undefined {
@@ -158,9 +186,25 @@ export async function saveImageFile(root: string, input: SaveImageAttachment, li
       await link(temporary, target)
     } catch (error) {
       /* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error
-      const existing = new Uint8Array(await readFile(target))
-      if (digest(existing) !== sha256) throw new AttachmentError('Stored attachment failed integrity verification.', 'ATTACHMENT_CORRUPT')
+      if (isEexist(error)) {
+        await verifyStoredObject(target, sha256)
+      } else if (isLinkUnavailable(error)) {
+        // The hard-link primitive is unavailable on this host: claim the
+        // content-addressed target exclusively and publish with an atomic
+        // rename. A claim collision is the same dedup case as EEXIST above.
+        let claimed = false
+        try {
+          const claim = await open(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)
+          await claim.close()
+          claimed = true
+        } catch (claimError: unknown) {
+          if (!isEexist(claimError)) throw claimError
+          await verifyStoredObject(target, sha256)
+        }
+        if (claimed) await rename(temporary, target)
+      } else {
+        throw error
+      }
     }
     // Persist the target entry and close a concurrent bucket-creation window
     // before the reference can reach a session checkpoint. The dedup path
@@ -168,7 +212,14 @@ export async function saveImageFile(root: string, input: SaveImageAttachment, li
     // that writer reaches its own durability boundary.
     await syncDirectory(bucket)
     await syncDirectory(join(root, 'objects'))
-    await unlink(temporary)
+    // The rename fallback consumes the staging entry; the link path keeps it
+    // as a second name until this unlink. Either way the object is published,
+    // so a missing staging entry on the success path is not an error.
+    await unlink(temporary).catch(
+      (cleanupError: unknown) => {
+        if (!(cleanupError instanceof Error && 'code' in cleanupError && cleanupError.code === 'ENOENT')) throw cleanupError
+      },
+    )
   } catch (error) {
     /* v8 ignore next -- A descriptor can remain open only when the underlying write/sync/close operation fails. */
     if (handle !== undefined) await handle.close().catch(

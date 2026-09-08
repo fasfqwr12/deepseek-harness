@@ -29,6 +29,16 @@ export interface ISessions {
   /** Atomic current-session provide projection (the renderer host's `sessions.provideInfo` feed). */
   readonly currentProvideInfo: HostObservable<SessionMaybeProvideInfo>
   /**
+   * Resolve one session's standard-props bundle by id — the renderer's
+   * keep-alive face for rendering NON-current sessions (retained behind
+   * display:none so a switch back is a toggle, not a rebuild). Pure
+   * resolution, render-safe like the current projection; undefined for a
+   * session neither listed nor scoped, so the renderer evicts dead cache.
+   * @param id - session id.
+   * @returns the identity-stable bundle, or undefined when unresolvable.
+   */
+  provideInfoOf(id: SessionId): SessionMaybeProvideInfo | undefined
+  /**
    * The `session.search` result bound the wire schema fixes, exposed to
    * presentation as injected data. Not per-connection state: every transport
    * (fixture included) reports the same number.

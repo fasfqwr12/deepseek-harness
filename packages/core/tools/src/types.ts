@@ -14,6 +14,15 @@ export interface CodeDispatchStartEventData {
   subCallId: CallId
   name: string
   arguments: unknown
+  /**
+   * Location of the owning root `run_code` call. Model-issued callIds are only
+   * step-unique (providers restart numbering per response), so UIs pairing
+   * dispatch events with their root `tool/call` must namespace by turn/step.
+   * Optional because logs written before this field existed carry neither;
+   * loaders stamp it from the enclosing step boundaries.
+   */
+  turn?: number
+  step?: number
 }
 
 /** Payload recorded when one nested Code Mode Tool dispatch settles. */

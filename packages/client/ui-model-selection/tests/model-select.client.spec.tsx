@@ -127,8 +127,8 @@ describe('ModelSelect reasoning effort', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /联网搜索/ }))
     expect(screen.getAllByRole('menuitemradio').map(item => item.textContent)).toEqual([
       '自动开放 DSH 搜索工具，由模型按需调用。',
-      '模型原生不开放 DSH 搜索，交给上游模型自身的联网能力。',
-      'DSH 接管开放 DSH web_search，使用默认搜索服务。',
+      '模型原生优先上游原生联网；无原生联网时 DSH 自动接手搜索。',
+      'DSH 接管强制使用 DSH 搜索工具，上游原生联网将被忽略。',
       '关闭本会话禁用联网搜索。',
     ])
   })

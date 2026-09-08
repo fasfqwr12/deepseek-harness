@@ -63,16 +63,14 @@ function validateRetry(
     fail('llm/retry policyKey must be a non-empty string')
   }
   switch (mode) {
-    case 'normal': {
+    case 'normal':
+    case 'always': {
       const { maxRetries } = event.data
       if (!Number.isSafeInteger(maxRetries) || maxRetries < 1 || retry > maxRetries) {
         fail(`llm/retry retry ${retry} must not exceed a positive safe maxRetries ${maxRetries}`)
       }
       break
     }
-    case 'always':
-      if ('maxRetries' in event.data) fail('llm/retry always mode must omit maxRetries')
-      break
     default:
       fail(`llm/retry mode must be normal or always, got ${String(mode)}`)
   }

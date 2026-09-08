@@ -318,6 +318,15 @@ export interface ToolExecutionInput {
    * a root execution; nested dispatchers propagate the enclosing value.
    */
   readonly rootCallId?: CallId
+  /**
+   * Turn/step of the root call's `tool/call` event, set by the agent loop.
+   * Model-issued callIds are only step-unique, so transports that log
+   * location-sensitive sub-events (Code Mode dispatches) read it from here.
+   * Optional because nested dispatchers build inputs without it; only the
+   * root execution needs the location.
+   */
+  readonly turn?: number
+  readonly step?: number
   readonly name: string
   /** Losslessly JSON-serializable parsed arguments (tools validate their own schema). */
   readonly arguments: unknown

@@ -171,6 +171,14 @@ export interface SlotRendererHost {
      * undefined while no current session resolves.
      */
     provideInfo: HostObservable<SessionMaybeProvideInfo>
+    /**
+     * Per-session provide bundle resolution for keep-alive rendering of
+     * NON-current sessions (recent sessions stay mounted behind
+     * display:none; a switch back is a toggle, not a rebuild). Absent on
+     * hosts without multi-session support — the renderer then keeps the
+     * per-switch remount behavior.
+     */
+    infoOf?: ((id: string) => SessionMaybeProvideInfo | undefined) | undefined
   }
   /** Workspace-side standard-kit sources. */
   workspaces: {

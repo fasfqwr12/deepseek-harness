@@ -316,6 +316,39 @@ describe('registration', () => {
     const prompt = renderPrompt(await ctx.systemPrompt.assemble())
     expect(prompt).toContain('Non-zero exits are reported as `[exit code: N]` markers')
     expect(prompt).toContain('without a signal marker')
+    expect(prompt).toContain('Issue independent read/search/fetch calls together in one response.')
+  })
+
+  it('classifies only the host-owned exact Get-Location command as parallel', async () => {
+    const { ctx } = await setup()
+    const executionMode = (args: unknown) => ctx.tools.executionMode({
+      signal: testToolSignal,
+      callId: CallId('pwsh-execution-mode'),
+      name: 'pwsh',
+      arguments: args,
+    })
+
+    expect(executionMode({ command: 'Get-Location', description: 'Print current directory' }))
+      .toEqual({ kind: 'parallel' })
+
+    for (const args of [
+      { command: ' Get-Location', description: 'Leading space changes the command' },
+      { command: 'Get-Location ', description: 'Trailing space changes the command' },
+      { command: 'get-location', description: 'Different command spelling' },
+      { command: 'Get-Location; Remove-Item -Force file', description: 'Write after read' },
+      { command: '$(Get-Location)', description: 'Subexpression' },
+      { command: 'Get-Location | Out-String', description: 'Pipeline' },
+      { command: 'Get-Location > output.txt', description: 'Redirection' },
+      { command: 'Get-Location', description: 'Background process', run_in_background: true },
+      { command: 'Get-Location', description: 'Sandbox escalation', sandbox_permissions: 'workspace-write', justification: 'test' },
+    ]) {
+      expect(executionMode(args)).toEqual({ kind: 'exclusive' })
+    }
+
+    const schema = ctx.tools.schemas().find(item => item.name === 'pwsh')!
+    const properties = schema.parameters.properties as Record<string, unknown>
+    expect(properties).not.toHaveProperty('concurrency_safe')
+    expect(schema as unknown as Record<string, unknown>).not.toHaveProperty('isConcurrencySafe')
   })
 
   it('stays pending until ctx.shell exists (inject)', async () => {
@@ -588,8 +621,10 @@ describe('sandbox escalation through ctx.approval', () => {
     const { ctx } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
+    // A same-level request grants nothing new: the command runs under the
+    // standing mode without an approval prompt.
     const result = await call(ctx, 'pwsh', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
-    expect(text(result)).toContain('not strictly wider')
+    expect(result.isError).toBe(false)
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()

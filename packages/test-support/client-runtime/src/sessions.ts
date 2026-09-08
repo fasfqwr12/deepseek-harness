@@ -339,6 +339,17 @@ export class TestSessions implements ISessions {
   }
 
   /**
+   * Production provideInfoOf mirror (the renderer's keep-alive face for
+   * NON-current sessions): the definite bundle for a known session,
+   * undefined otherwise, so the renderer evicts dead cache entries.
+   * @param id - session id.
+   * @returns the identity-stable bundle, or undefined for unknown sessions.
+   */
+  provideInfoOf(id: SessionId): SessionMaybeProvideInfo | undefined {
+    return this.provideInfo(id)
+  }
+
+  /**
    * Resolve the current-session-optional standard kit (host face member):
    * unknown or absent ids return the static no-session projection.
    * @param id - current session id, when selected.

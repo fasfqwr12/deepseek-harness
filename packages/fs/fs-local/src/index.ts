@@ -26,6 +26,7 @@ import {
   normalizeLineEndings,
   probe,
   probeNoFollow,
+  probeFileEncoding,
   readForEdit,
   readTextForDiff,
   readWholeBytes,
@@ -187,6 +188,10 @@ export class LocalFileSystem extends FileSystem {
       }
       // No expectation means an unconditional but still atomic write.
 
+      // 探测既有文件的文本编码：write 全量覆盖也保持原编码（GBK 工程文件不得被静默转 UTF-8）。
+      const encoding = existing !== null
+        ? await probeFileEncoding(target.targetKey)
+        : 'utf-8'
       // Capture an optional contextual-diff basis before the write. The bounded
       // reader checks the opened file itself, so an external replacement after
       // `probe()` cannot turn this best-effort presentation read into an
@@ -195,7 +200,7 @@ export class LocalFileSystem extends FileSystem {
       const diffable = existing !== null
         && Buffer.byteLength(content, 'utf8') < this.config.diffBasisMaxBytes
       const before = diffable
-        ? await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal)
+        ? await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal, encoding)
         : null
       await writeFileAtomic(
         target.targetKey,
@@ -204,6 +209,7 @@ export class LocalFileSystem extends FileSystem {
         signal,
         this.internals,
         expected?.kind === 'createIfAbsent' ? { displayPath: target.displayPath } : undefined,
+        encoding,
       )
       const after = await probe(target.targetKey)
       return {
@@ -241,7 +247,8 @@ export class LocalFileSystem extends FileSystem {
       const original = await readForEdit(target.targetKey, target.displayPath, signal)
       const edited = applyLiteralEdit(original.content, edit.oldString, edit.newString, edit.replaceAll, target.displayPath)
       const content = restoreLineEndings(edited.content, original.lineEndings)
-      await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals)
+      // 用读入时检测的编码写回：GBK 文件编辑后仍是 GBK（Keil 侧不乱码）。
+      await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals, undefined, original.encoding)
 
       const after = await probe(target.targetKey)
       return {

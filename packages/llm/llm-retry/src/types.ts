@@ -35,6 +35,7 @@ export type LlmRetryEventData =
     mode: 'always'
     policyKey: string
     retry: number
+    maxRetries: number
     delayMs: number
     failure: LlmFailure
   }

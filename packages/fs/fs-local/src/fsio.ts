@@ -5,6 +5,7 @@
  * @module @deepseek-ai/dsh-fs-local/fsio
  */
 
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { chmod, link, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, stat } from 'node:fs/promises'
@@ -24,6 +25,23 @@ function isENOENT(error: unknown): boolean {
 
 function isEEXIST(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'EEXIST'
+}
+
+/**
+ * Errnos that cannot describe a real `link()` outcome for this publication:
+ * the staged source is a regular file this writer just created, and the
+ * guarded-create caller only reaches here after the target was observed
+ * absent. They mean the hard-link primitive itself is unavailable — a kernel
+ * filter driver (e.g. a transparent-encryption minifilter) rejects
+ * CreateHardLinkW with a mapped `EISDIR` even for a missing target, and
+ * FAT-style filesystems return `EPERM`/`ENOSYS`/`EOPNOTSUPP` for links.
+ * `EACCES` is deliberately excluded: a denial stays a denial.
+ */
+function isLinkPrimitiveUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error) || !('code' in error)) return false
+  const code = (error as Error & { code?: string }).code
+  return code === 'EISDIR' || code === 'EPERM' || code === 'ENOSYS'
+    || code === 'EOPNOTSUPP' || code === 'ENOTSUP' || code === 'EINVAL' || code === 'EXDEV'
 }
 
 /**
@@ -322,17 +340,38 @@ export async function listDirectory(target: LocalTarget, signal?: AbortSignal): 
 
 // --- Reading ---
 
-function notTextError(verb: 'read' | 'edit', displayPath: string): FsError {
-  return new FsError(`cannot ${verb} "${displayPath}": invalid UTF-8 text`, 'FS_NOT_TEXT')
+/** 检测到的文本编码：合法 UTF-8 优先（纯 ASCII 两者字节相同亦判 utf-8），GBK 回退（中文 Windows 工程惯例）。 */
+export type TextEncoding = 'utf-8' | 'gbk'
+
+/** 编码对应的 Windows 代码页（受信写入器使用）。 */
+function codePageOf(encoding: TextEncoding): number {
+  return encoding === 'gbk' ? 936 : 65001
 }
 
-function decodeUtf8(buffer: Uint8Array, verb: 'read' | 'edit', displayPath: string): string {
+function notTextError(verb: 'read' | 'edit', displayPath: string): FsError {
+  return new FsError(`cannot ${verb} "${displayPath}": invalid UTF-8 or GBK text`, 'FS_NOT_TEXT')
+}
+
+/**
+ * 字节级编码检测并整段解码：严格 UTF-8 成功 ⇒ utf-8；否则严格 GBK 成功 ⇒ gbk；
+ * 两者皆非法 ⇒ FS_NOT_TEXT（真二进制/其他编码）。
+ */
+function decodeTextBuffer(
+  buffer: Uint8Array,
+  verb: 'read' | 'edit',
+  displayPath: string,
+): { text: string; encoding: TextEncoding } {
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
-  } catch (error: unknown) {
-    /* v8 ignore next 2 -- TextDecoder({fatal}) only throws TypeError on invalid bytes; any other throw is an unreachable runtime fault. */
-    if (!(error instanceof TypeError)) throw error
-    throw notTextError(verb, displayPath)
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(buffer), encoding: 'utf-8' }
+  } catch (utf8Error: unknown) {
+    if (!(utf8Error instanceof TypeError)) throw utf8Error
+    try {
+      // GBK 回退：中文 Windows 工程（Keil 等）源码默认 GBK，严格解码非法序列仍抛错。
+      return { text: new TextDecoder('gbk', { fatal: true }).decode(buffer), encoding: 'gbk' }
+    } catch (gbkError: unknown) {
+      if (!(gbkError instanceof TypeError)) throw gbkError
+      throw notTextError(verb, displayPath)
+    }
   }
 }
 
@@ -366,8 +405,8 @@ async function statRegularFile(target: LocalTarget, verb: 'read', signal?: Abort
 }
 
 /**
- * Read a whole regular UTF-8 text file into a single decoded string. Rejects
- * non-regular files, invalid UTF-8, and NUL-byte binary samples.
+ * Read a whole regular UTF-8/GBK text file into a single decoded string. Rejects
+ * non-regular files, text neither valid UTF-8 nor valid GBK, and NUL-byte binary samples.
  * @param target - the resolved file to read.
  * @param signal - aborts the read (`FS_ABORTED`).
  * @returns the full decoded text, byte-for-byte (no normalization).
@@ -379,7 +418,7 @@ export async function readWholeText(target: LocalTarget, signal?: AbortSignal): 
   if (raw.subarray(0, BINARY_SAMPLE_BYTES).includes(0)) {
     throw new FsError(`cannot read "${target.displayPath}": binary file`, 'FS_NOT_TEXT')
   }
-  return decodeUtf8(raw, 'read', target.displayPath)
+  return decodeTextBuffer(raw, 'read', target.displayPath).text
 }
 
 /**
@@ -426,10 +465,35 @@ export async function readWholeBytes(
   return Buffer.concat(chunks, bytes)
 }
 
+/** 流式读的前导编码检测窗口：前 64KB 判定 UTF-8/GBK，后续块按该编码流式解码。 */
+const ENCODING_DETECT_BYTES = 64 * 1024
+
 /**
- * Stream a whole regular UTF-8 text file as decoded text chunks. Same text
+ * 在流式读的前导缓冲上检测编码：UTF-8 优先，GBK 回退。多字节序列可能恰好
+ * 截断在缓冲尾部，故每轮去掉末尾 ≤3 字节重试（截尾只影响判定，解码时缓冲
+ * 从头重新喂给流式 decoder，无字节丢失）。
+ */
+function detectStreamEncoding(prefix: Buffer, displayPath: string): TextEncoding {
+  for (const trim of [0, 1, 2, 3]) {
+    const sample = prefix.subarray(0, prefix.length - trim)
+    for (const encoding of ['utf-8', 'gbk'] as const) {
+      try {
+        new TextDecoder(encoding, { fatal: true }).decode(sample)
+        return encoding
+      } catch (error: unknown) {
+        if (!(error instanceof TypeError)) throw error
+      }
+    }
+  }
+  throw notTextError('read', displayPath)
+}
+
+/**
+ * Stream a whole regular UTF-8/GBK text file as decoded text chunks. Same text
  * semantics as {@link readWholeText} (regular-file check, binary/NUL rejection,
- * cross-chunk UTF-8 decoding), but never holds the whole file in memory.
+ * cross-chunk decoding in the detected encoding), but never holds the whole file
+ * in memory. Encoding is decided from the leading 64 KiB, then applied to the
+ * entire stream; chunk boundaries carry no meaning.
  * @param target - the resolved file to stream.
  * @param signal - aborts the stream, including between chunks (`FS_ABORTED`).
  * @returns decoded text chunks in file order; chunk boundaries carry no meaning.
@@ -437,7 +501,9 @@ export async function readWholeBytes(
 export async function* streamWholeText(target: LocalTarget, signal?: AbortSignal): AsyncIterable<string> {
   await statRegularFile(target, 'read', signal)
   const stream = createReadStream(target.targetKey, signal ? { signal } : {})
-  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let decoder: TextDecoder | undefined
+  let detectChunks: Buffer[] = []
+  let detectBytes = 0
   let sampledBytes = 0
 
   function scanBinarySample(chunk: Buffer): void {
@@ -452,7 +518,25 @@ export async function* streamWholeText(target: LocalTarget, signal?: AbortSignal
   try {
     for await (const chunk of stream as AsyncIterable<Buffer>) {
       scanBinarySample(chunk)
+      if (decoder === undefined && detectBytes < ENCODING_DETECT_BYTES) {
+        detectChunks.push(chunk)
+        detectBytes += chunk.length
+        continue
+      }
+      if (decoder === undefined) {
+        const prefix = Buffer.concat(detectChunks)
+        decoder = new TextDecoder(detectStreamEncoding(prefix, target.displayPath), { fatal: true })
+        detectChunks = []
+        yield decodeUtf8Stream(decoder, prefix, 'read', target.displayPath)
+      }
       yield decodeUtf8Stream(decoder, chunk, 'read', target.displayPath)
+    }
+    if (decoder === undefined) {
+      // 文件小于检测窗口：整段缓冲上判定并解码。
+      const whole = Buffer.concat(detectChunks)
+      decoder = new TextDecoder(detectStreamEncoding(whole, target.displayPath), { fatal: true })
+      detectChunks = []
+      yield decodeUtf8Stream(decoder, whole, 'read', target.displayPath)
     }
     yield decodeUtf8Stream(decoder, undefined, 'read', target.displayPath)
   } catch (error: unknown) {
@@ -515,6 +599,101 @@ async function throwGuardedCreateFailure(
   throw new FsError(`cannot write "${displayPath}": ${errorMessage(error)}`, 'FS_IO_ERROR', { cause: error })
 }
 
+// --- 受信写入（Tipray 加密驱动规避） ---
+
+/** 可用的受信写入器：PowerShell 7 优先，Windows PowerShell 兜底。 */
+type TrustedWriter = 'pwsh.exe' | 'powershell.exe'
+
+/** 单引号 PowerShell 字符串字面量（内部单引号加倍转义）。 */
+function psLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+/** 进程级缓存的受信写入器探测结果；null 表示不可用（回退 Node 原生写入）。 */
+let trustedWriterProbe: Promise<TrustedWriter | null> | undefined
+
+/**
+ * 用受信 PowerShell 子进程把文本内容按指定编码精确写入 tempPath（CreateNew 独占 + WriteThrough）。
+ * node.exe 的写盘会被 Tipray 透明加密驱动加密（落盘 88 7D 密文），而受信进程写盘为明文；
+ * 文本经 stdin 以 UTF-8 base64 传输（纯 ASCII，任何控制台编码下无损），脚本内按目标
+ * 代码页（65001/936）转码并做严格往返校验（转回字符串不一致 ⇒ exit 2，防静默替换 '?'），
+ * 其余失败以非零退出码上报。
+ */
+async function runTrustedWriter(
+  exe: string,
+  tempPath: string,
+  utf8Bytes: Buffer,
+  encoding: TextEncoding,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal, 'write')
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    'try {',
+    '$u=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))',
+    `$e=[Text.Encoding]::GetEncoding(${codePageOf(encoding)})`,
+    '$g=$e.GetBytes($u)',
+    'if ($e.GetString($g) -ne $u) { exit 2 }',
+    `$fs=[IO.FileStream]::new(${psLiteral(tempPath)},[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,8192,[IO.FileOptions]::WriteThrough)`,
+    'try { $fs.Write($g,0,$g.Length); $fs.Flush($true) } finally { $fs.Dispose() }',
+    '} catch { [Console]::Error.Write($_.Exception.Message); exit 1 }',
+  ].join('\n')
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(exe, ['-NoProfile', '-Command', script], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      timeout: 30_000,
+      ...signal ? { signal } : {},
+    })
+    const stderr: Buffer[] = []
+    child.stderr?.on('data', (chunk: Buffer) => { stderr.push(chunk) })
+    child.on('error', reject)
+    // 子进程早退时 stdin 可能 EPIPE；以退出码为准，忽略管道错误。
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(utf8Bytes.toString('base64'))
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+        return
+      }
+      const detail = code === 2
+        ? 'target encoding cannot represent the content (roundtrip mismatch)'
+        : Buffer.concat(stderr).toString('utf8').trim()
+      reject(new FsError(
+        `trusted writer ${exe} failed (exit ${code}): ${detail}`,
+        'FS_IO_ERROR',
+      ))
+    })
+  })
+}
+
+/** 探测一次可用的受信写入器；非 Windows 或 DSH_TIPRAY_PWSH_WRITE=0 时禁用。 */
+function probeTrustedWriter(): Promise<TrustedWriter | null> {
+  if (process.platform !== 'win32' || process.env.DSH_TIPRAY_PWSH_WRITE === '0') {
+    return Promise.resolve(null)
+  }
+  return (async () => {
+    for (const exe of ['pwsh.exe', 'powershell.exe'] as const) {
+      const ok = await new Promise<boolean>((resolve) => {
+        const child = spawn(exe, ['-NoProfile', '-Command', 'exit 0'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: 15_000,
+        })
+        child.on('error', () => { resolve(false) })
+        child.on('close', (code) => { resolve(code === 0) })
+      })
+      if (ok) return exe
+    }
+    return null
+  })()
+}
+
+function trustedWriter(): Promise<TrustedWriter | null> {
+  trustedWriterProbe ??= probeTrustedWriter()
+  return trustedWriterProbe
+}
+
 /**
  * Atomically replace a file through a private, synced staging file in the same directory.
  * POSIX protects the staging directory and file with `0o700` and `0o600`. A new Windows file
@@ -526,9 +705,11 @@ async function throwGuardedCreateFailure(
  * inert as a mode on Windows but identifies replacement security semantics.
  * @param signal - cancellation checked before final publication.
  * @param internals - Test hook for pinning temp names and observing the staged file.
- * @param createIfAbsent - when provided, publish with a hard-link no-replace
- * primitive; a concurrent creator's file is preserved and this write is
- * rejected with `FS_NOT_OBSERVED` using the supplied display path.
+ * @param createIfAbsent - when provided, publish with a no-replace primitive
+ * (a hard link where the host supports one; otherwise an exclusive create
+ * claim followed by an atomic rename); a concurrent creator's file is
+ * preserved and this write is rejected with `FS_NOT_OBSERVED` using the
+ * supplied display path.
  */
 export async function writeFileAtomic(
   absolutePath: string,
@@ -537,6 +718,7 @@ export async function writeFileAtomic(
   signal: AbortSignal | undefined,
   internals: FsIoInternals = {},
   createIfAbsent?: { displayPath: string },
+  encoding: TextEncoding = 'utf-8',
 ): Promise<void> {
   throwIfAborted(signal, 'write')
   const directory = dirname(absolutePath)
@@ -562,24 +744,81 @@ export async function writeFileAtomic(
     stagingCreated = true
     await chmod(stagingDir, 0o700)
 
-    handle = await open(tempPath, 'wx', 0o600)
-    await handle.chmod(0o600)
-    if (platform === 'win32' && mode !== undefined) {
-      await copyFileDacl(absolutePath, tempPath)
+    // Tipray 透明加密驱动会加密 node.exe 进程写入的内容（落盘 88 7D 密文，外部工具读到乱码）。
+    // 优先委托受信 PowerShell 子进程写入临时文件内容；Node 仅负责元数据与原子发布
+    // （mkdir/chmod/DACL/rename 都不写文件内容，不触发加密）。无可用受信写入器
+    // （非 Windows / 未安装 / DSH_TIPRAY_PWSH_WRITE=0）时回退 Node 原生写入。
+    const writer = await trustedWriter()
+    if (writer !== null) {
+      await runTrustedWriter(writer, tempPath, Buffer.from(content, 'utf8'), encoding, signal)
+      await chmod(tempPath, 0o600)
+      if (platform === 'win32' && mode !== undefined) {
+        await copyFileDacl(absolutePath, tempPath)
+      }
+      await internals.inspectTemp?.({ stagingDir, tempPath })
+      if (mode !== undefined) await chmod(tempPath, mode)
+      // 写后校验：按目标编码解码读回字节（Node 跨进程读到的就是磁盘原始字节——
+      // 受信写入为明文），与请求内容比对；不一致说明落盘被加密或转码损坏，
+      // 立即中止（不发布），避免静默写坏文件。
+      const readback = await readFile(tempPath)
+      let decoded: string
+      try {
+        decoded = new TextDecoder(encoding, { fatal: true }).decode(readback)
+      } catch {
+        // 解码失败（落盘密文/转码损坏）：哨兵值必不等于 content，走统一 mismatch 报错。
+        decoded = '\u0000decoding-failed'
+      }
+      if (decoded !== content) {
+        throw new FsError(`write failed for "${absolutePath}": trusted-writer ${encoding} content verification mismatch`, 'FS_IO_ERROR')
+      }
+    } else {
+      if (encoding !== 'utf-8') {
+        // Node 原生路径只有 UTF-8 编码器（TextEncoder 不支持 GBK）；
+        // GBK 写回必须走受信写入器，显式禁用时直接报错而不是写出乱码。
+        throw new FsError(`cannot write "${absolutePath}" as ${encoding} without the trusted PowerShell writer (DSH_TIPRAY_PWSH_WRITE=0 disables it)`, 'FS_IO_ERROR')
+      }
+      handle = await open(tempPath, 'wx', 0o600)
+      await handle.chmod(0o600)
+      if (platform === 'win32' && mode !== undefined) {
+        await copyFileDacl(absolutePath, tempPath)
+      }
+      await handle.writeFile(content, { encoding: 'utf8', ...signal ? { signal } : {} })
+      await handle.sync()
+      await internals.inspectTemp?.({ stagingDir, tempPath })
+      if (mode !== undefined) await handle.chmod(mode)
+      await handle.close()
+      handle = undefined
     }
-    await handle.writeFile(content, { encoding: 'utf8', ...signal ? { signal } : {} })
-    await handle.sync()
-    await internals.inspectTemp?.({ stagingDir, tempPath })
-    if (mode !== undefined) await handle.chmod(mode)
-    await handle.close()
-    handle = undefined
 
     throwIfAborted(signal, 'write')
     if (createIfAbsent !== undefined) {
       try {
         await linkFile(tempPath, absolutePath)
       } catch (error: unknown) {
-        await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        if (!isLinkPrimitiveUnavailable(error)) {
+          await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        }
+        // The hard-link primitive is unavailable although the failure is not
+        // a lost race: claim the publication target exclusively, then publish
+        // with an atomic rename. A concurrent creator's file is still
+        // preserved — the exclusive claim fails with EEXIST — and this
+        // writer's content still lands in a single rename.
+        try {
+          const claim = await open(absolutePath, 'wx', 0o600)
+          await claim.close()
+        } catch (claimError: unknown) {
+          await throwGuardedCreateFailure(claimError, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        }
+        try {
+          await rename(tempPath, absolutePath)
+        } catch (renameError: unknown) {
+          // The claim is an empty file owned by this writer: undo it so a
+          // retry does not observe a phantom target.
+          try {
+            await rm(absolutePath, { force: true })
+          } catch { /* best effort */ }
+          throw renameError
+        }
       }
     } else if (platform === 'win32' && mode !== undefined) {
       try {
@@ -661,23 +900,49 @@ function countOccurrences(content: string, needle: string): number {
 
 /**
  * Read and decode a file for editing: rejects binaries, returns LF-normalized
- * content plus the original line-ending style for write-back.
+ * content plus the original line-ending style and detected encoding for write-back
+ * (an edit must not silently re-encode a GBK file to UTF-8 and corrupt it in Keil).
  * @param absolutePath - the file to read (typically a target key).
  * @param displayPath - the caller-facing path used in error messages.
  * @param signal - aborts the read (`FS_ABORTED`).
- * @returns the LF-normalized content and the detected style to restore on write-back.
+ * @returns the LF-normalized content, the detected style, and the detected encoding to restore on write-back.
  */
 export async function readForEdit(
   absolutePath: string,
   displayPath: string,
   signal?: AbortSignal,
-): Promise<{ content: string; lineEndings: LineEndings }> {
+): Promise<{ content: string; lineEndings: LineEndings; encoding: TextEncoding }> {
   throwIfAborted(signal, 'edit')
   const buffer = await readFileAbortable(absolutePath, 'edit', signal)
   throwIfAborted(signal, 'edit')
   if (buffer.includes(0)) throw new FsError(`cannot edit "${displayPath}": binary file`, 'FS_NOT_TEXT')
-  const raw = decodeUtf8(buffer, 'edit', displayPath)
-  return { content: normalizeLineEndings(raw), lineEndings: detectLineEndings(raw) }
+  const { text: raw, encoding } = decodeTextBuffer(buffer, 'edit', displayPath)
+  return { content: normalizeLineEndings(raw), lineEndings: detectLineEndings(raw), encoding }
+}
+
+/**
+ * Probe a file's text encoding from its leading bytes (for write-back encoding
+ * preservation): valid UTF-8 (or pure ASCII) ⇒ utf-8, valid GBK ⇒ gbk. Any read
+ * error, non-regular file, binary sample, or neither-encoding content falls
+ * back to utf-8 — a best-effort hint, never a hard failure.
+ * @param absolutePath - the file to probe.
+ * @returns the detected encoding, or utf-8 when undeterminable.
+ */
+export async function probeFileEncoding(absolutePath: string): Promise<TextEncoding> {
+  try {
+    const handle = await open(absolutePath, 'r')
+    try {
+      const buffer = Buffer.allocUnsafe(Math.min(ENCODING_DETECT_BYTES, 8192))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null)
+      const sample = buffer.subarray(0, bytesRead)
+      if (sample.includes(0)) return 'utf-8'
+      return detectStreamEncoding(Buffer.from(sample), absolutePath)
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return 'utf-8'
+  }
 }
 
 /**
@@ -696,6 +961,7 @@ export async function readTextForDiff(
   absolutePath: string,
   maxBytes: number,
   signal?: AbortSignal,
+  encoding: TextEncoding = 'utf-8',
 ): Promise<string | null> {
   throwIfAborted(signal, 'read')
   try {
@@ -727,7 +993,7 @@ export async function readTextForDiff(
     const basis = buffer.subarray(0, total)
     if (basis.includes(0)) return null
     try {
-      return normalizeLineEndings(new TextDecoder('utf-8', { fatal: true }).decode(basis))
+      return normalizeLineEndings(new TextDecoder(encoding, { fatal: true }).decode(basis))
     } catch (error: unknown) {
       /* v8 ignore next 2 -- TextDecoder({fatal}) only throws TypeError on invalid bytes;
        * any other throw is an unreachable runtime fault. */

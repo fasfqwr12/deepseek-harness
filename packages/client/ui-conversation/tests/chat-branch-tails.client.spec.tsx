@@ -865,6 +865,7 @@ describe('MessageItem arms', () => {
         mode: 'always',
         policyKey: 'mock-always',
         retry: 3,
+        maxRetries: 5,
         delayMs: 3_500.4,
         failure: { code: 'TRANSPORT', message: '继续重试' },
       }}

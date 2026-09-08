@@ -8,7 +8,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { FsError } from '@deepseek-ai/dsh-fs'
 import type { FsObservation, FsTarget, FsVersion, FsWriteIntent } from '@deepseek-ai/dsh-fs'
 import type { FsObservationActor } from './types.ts'
 
@@ -58,33 +57,20 @@ class ObservedStateGate {
     this.observed = new WeakMap()
   }
 
-  /**
-   * Decide the write intent: unseen or confirmed absent ⇒ `createIfAbsent`;
-   * confirmed present ⇒ `replaceIfVersion` at the observed version.
-   */
-  writeIntent(target: FsTarget, actor: object | undefined): FsWriteIntent {
+  /** Return a version guard only when an authoritative observation exists. */
+  writeIntent(target: FsTarget, actor: object | undefined): FsWriteIntent | undefined {
     const owner = this.owner(actor)
     const prior = owner ? this.get(owner, target.targetKey) : undefined
     return prior?.kind === 'present'
       ? { kind: 'replaceIfVersion', version: prior.version }
-      : { kind: 'createIfAbsent' }
+      : undefined
   }
 
-  /**
-   * Decide the edit version guard: unseen rejects with `FS_NOT_OBSERVED`,
-   * confirmed absence rejects with `FS_NOT_FOUND`, and presence supplies the
-   * observed version as the CAS basis.
-   */
-  editIntent(target: FsTarget, actor: object | undefined): { version: FsVersion } {
+  /** Return a version guard for observed files; unseen files use the bare provider. */
+  editIntent(target: FsTarget, actor: object | undefined): { version: FsVersion } | undefined {
     const owner = this.owner(actor)
     const prior = owner ? this.get(owner, target.targetKey) : undefined
-    if (!owner || prior === undefined) {
-      throw new FsError(`edit requires reading "${target.displayPath}" first`, 'FS_NOT_OBSERVED')
-    }
-    if (prior.kind === 'absent') {
-      throw new FsError(`cannot edit "${target.displayPath}": not found`, 'FS_NOT_FOUND')
-    }
-    return { version: prior.version }
+    return prior?.kind === 'present' ? { version: prior.version } : undefined
   }
 
   /** Record an authoritative present or absent observation for this owner and target. */
@@ -116,10 +102,16 @@ export function apply(ctx: Context): void {
   // fs/write-intent: occupy the single decision slot — do NOT call next().
   // Deferred through Promise.resolve().then so the declared Promise return type
   // holds (a throw rejects, never escapes synchronously through the waterfall).
-  ctx.on('fs/write-intent', (target, actor) => Promise.resolve().then(() => gate.writeIntent(target, actor)))
+  ctx.on('fs/write-intent', (target, actor, next) => Promise.resolve().then(() => {
+    const intent = gate.writeIntent(target, actor)
+    return intent ?? next()
+  }))
 
-  // fs/edit-intent: occupy the single decision slot — do not call next().
-  ctx.on('fs/edit-intent', (target, actor) => Promise.resolve().then(() => gate.editIntent(target, actor)))
+  // fs/edit-intent: use the bare provider when no observation exists.
+  ctx.on('fs/edit-intent', (target, actor, next) => Promise.resolve().then(() => {
+    const intent = gate.editIntent(target, actor)
+    return intent ?? next()
+  }))
 
   // fs/observed must remain synchronous and non-throwing: emit does not await
   // promises, and successful mutations have already committed. WeakMap.set

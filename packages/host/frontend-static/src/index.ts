@@ -68,7 +68,9 @@ export async function serveStatic(
   }
   const serveIndex = async (): Promise<void> => {
     const body = await renderIndex()
-    res.writeHead(200, { 'content-type': MIME['.html'] })
+    // no-cache：index.html 经 index-taps 动态注入（插件 CSS/JS），
+    // 无此头浏览器会启发式缓存旧页面，后端重启/插件更新后用户看不到变化
+    res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-cache' })
     res.end(body)
   }
   if (target === distRoot || target === distIndex) {

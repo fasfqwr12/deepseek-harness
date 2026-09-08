@@ -77,7 +77,7 @@ function observable<T>(initial: T) {
  * the entry's real handle, cached per (entry x scope key) like the real
  * ledger; session cells are identity-stable per id.
  */
-function makeHost() {
+function makeHost(opts?: { multiSession?: boolean }) {
   const entries = new Map<string, StoredEntry[]>()
   const specs = new Map<string, DeclaredSpec>()
   const versions = new Map<string, number>()
@@ -151,6 +151,9 @@ function makeHost() {
     sessions: {
       list,
       provideInfo: provide,
+      // Keep-alive face (multi-session hosts): resolve any added session's
+      // bundle by id; unknown/dead ids miss so the renderer evicts them.
+      ...(opts?.multiSession ? { infoOf: (id: string) => infos.get(id) } : {}),
     },
     workspaces: { list: workspaces },
   }
@@ -202,6 +205,12 @@ function makeHost() {
       const source = sessionSources.get(id)
       if (source === undefined) throw new Error(`unknown test session: ${id}`)
       source.set(snapshot)
+    },
+    /** Drop one session outright (infoOf misses from now on); a killed CURRENT session falls back to the absent projection. */
+    killSession: (id: string) => {
+      infos.delete(id)
+      sessionSources.delete(id)
+      if (currentId === id) provide.set(absentInfo)
     },
   }
 }
@@ -1025,5 +1034,174 @@ describe('session-maybe adoption identity', () => {
     act(() => { h.current.set('s1') })
     act(() => { h.current.set('s1') })
     expect(view.container.textContent).toBe('s1#1')
+  })
+})
+
+describe('session-maybe keep-alive (multi-session hosts)', () => {
+  const SINGLE_MAYBE: DeclaredSpec = { kind: 'single', scope: 'session-maybe' }
+  const SINGLE_STRICT: DeclaredSpec = { kind: 'single', scope: 'session' }
+
+  type View = ReturnType<typeof render>
+
+  /** One pool wrapper element by its data-keepalive id (blank for the no-session slot). */
+  const wrapper = (view: View, id: string): HTMLElement | null =>
+    view.container.querySelector<HTMLElement>(`[data-keepalive="${id}"]`)
+
+  /**
+   * Mount a maybe entry whose bodies record their mount ordinal: the body's
+   * identity across switches is the assertion axis (`s1#1` after a
+   * retire-then-promote cycle proves NO remount — the same instance came
+   * back). jsdom keeps display:none text in textContent, so assertions use
+   * the wrapper's style and per-body markers instead.
+   */
+  function mountMaybeBodies(h: Fake) {
+    let mounts = 0
+    h.declare('k.maybe', SINGLE_MAYBE)
+    h.add('k.maybe', {
+      component: ({ sessionId }: { sessionId?: string }) => {
+        // Local mount marker: useState initializer runs once per mounted body.
+        const [mount] = useState(() => ++mounts)
+        return <b data-body={`${sessionId ?? 'blank'}#${mount}`} />
+      },
+    })
+    const { view } = mountRoot(h, { 'k.maybe': SINGLE_MAYBE }, renderSlot => renderSlot('k.maybe', {}))
+    return { view }
+  }
+
+  it('retires the outgoing body behind display:none and promotes it back without remount', () => {
+    const h = makeHost({ multiSession: true })
+    h.addSession('s1')
+    h.addSession('s2')
+    const { view } = mountMaybeBodies(h)
+    act(() => { h.current.set('s1') })
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(1)
+    expect(wrapper(view, 's1')!.style.display).toBe('contents')
+    act(() => { h.current.set('s2') })
+    // s1 retired (hidden) + s2 live (visible); s1's body is still mount #1.
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(2)
+    expect(wrapper(view, 's1')!.style.display).toBe('none')
+    expect(wrapper(view, 's2')!.style.display).toBe('contents')
+    expect(view.container.querySelector('[data-body="s1#1"]')).not.toBeNull()
+    act(() => { h.current.set('s1') })
+    // Promoted: the SAME instance (mount #1) is visible again; s2 keeps its #2.
+    expect(view.container.querySelector('[data-body="s1#1"]')).not.toBeNull()
+    expect(wrapper(view, 's1')!.style.display).toBe('contents')
+    expect(wrapper(view, 's2')!.style.display).toBe('none')
+    expect(view.container.querySelector('[data-body="s2#2"]')).not.toBeNull()
+  })
+
+  it('keeps pos-0 adoption: blank → first session holds the body (one mount, no flash)', () => {
+    const h = makeHost({ multiSession: true })
+    h.addSession('s1')
+    const { view } = mountMaybeBodies(h)
+    expect(view.container.querySelector('[data-body="blank#1"]')).not.toBeNull()
+    act(() => { h.current.set('s1') })
+    // The blank-born body adopted s1: same mount #1, still exactly one body.
+    expect(view.container.querySelector('[data-body="s1#1"]')).not.toBeNull()
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(1)
+  })
+
+  it('bounds the pool at three bodies and evicts least-recently-used sessions', () => {
+    const h = makeHost({ multiSession: true })
+    for (const id of ['s1', 's2', 's3', 's4']) h.addSession(id)
+    const { view } = mountMaybeBodies(h)
+    act(() => { h.current.set('s1') })
+    act(() => { h.current.set('s2') })
+    act(() => { h.current.set('s3') })
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(3)
+    act(() => { h.current.set('s4') })
+    // Budget held: s1 (LRU tail) evicted — its body unmounted.
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(3)
+    expect(wrapper(view, 's1')).toBeNull()
+    expect(wrapper(view, 's2')).not.toBeNull()
+    act(() => { h.current.set('s1') })
+    // The evicted session comes back FRESH: a new mount ordinal (#5 after
+    // blank#1→adopted, s2#2, s3#3, s4#4).
+    expect(view.container.querySelector('[data-body="s1#5"]')).not.toBeNull()
+  })
+
+  it('drops to a fresh blank body on session loss while retained sessions survive, then promotes one', () => {
+    const h = makeHost({ multiSession: true })
+    h.addSession('s1')
+    h.addSession('s2')
+    const { view } = mountMaybeBodies(h)
+    act(() => { h.current.set('s1') })
+    act(() => { h.current.set('s2') })
+    act(() => { h.current.set(undefined) })
+    // Blank live body (#3) + s2/s1 retained with their original instances.
+    expect(wrapper(view, 'blank')!.style.display).toBe('contents')
+    expect(view.container.querySelector('[data-body="blank#3"]')).not.toBeNull()
+    expect(view.container.querySelector('[data-body="s2#2"]')).not.toBeNull()
+    expect(view.container.querySelector('[data-body="s1#1"]')).not.toBeNull()
+    act(() => { h.current.set('s1') })
+    // Selecting a RETAINED session from blank promotes it — the blank body
+    // is dropped (nothing to retain) and s1 returns as the SAME instance.
+    expect(view.container.querySelector('[data-body="s1#1"]')).not.toBeNull()
+    expect(wrapper(view, 's1')!.style.display).toBe('contents')
+    expect(wrapper(view, 'blank')).toBeNull()
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(2)
+  })
+
+  it('evicts a retained body whose session stopped resolving (dead sessions unmount)', () => {
+    const h = makeHost({ multiSession: true })
+    for (const id of ['s1', 's2', 's3']) h.addSession(id)
+    const { view } = mountMaybeBodies(h)
+    act(() => { h.current.set('s1') })
+    act(() => { h.current.set('s2') })
+    h.killSession('s1')
+    act(() => { h.current.set('s3') })
+    // s1 was retained when it died: the next render drops its slot entirely.
+    expect(wrapper(view, 's1')).toBeNull()
+    expect(wrapper(view, 's2')).not.toBeNull()
+    expect(wrapper(view, 's3')).not.toBeNull()
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(2)
+  })
+
+  it('drops a dead CURRENT session without retaining it: session loss to a fresh blank', () => {
+    const h = makeHost({ multiSession: true })
+    h.addSession('s1')
+    const { view } = mountMaybeBodies(h)
+    act(() => { h.current.set('s1') })
+    act(() => { h.killSession('s1') })
+    // Killing the current session publishes the absent projection: loss path
+    // fires, and the dead session is NOT retained (infoOf misses).
+    expect(view.container.querySelector('[data-body="blank#2"]')).not.toBeNull()
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(1)
+  })
+
+  it('renders a retained body and its strict session children against ITS pinned bundle, not the current one', () => {
+    const h = makeHost({ multiSession: true })
+    h.addSession('s1')
+    h.addSession('s2')
+    const seen: { sessionId: string | undefined; read: unknown }[] = []
+    h.declare('k.maybe', SINGLE_MAYBE)
+    h.declare('k.strict', SINGLE_STRICT)
+    h.add('k.maybe', {
+      component: (props: { renderSlot: RenderSlotFn }) => <>{props.renderSlot('k.strict', {})}</>,
+      children: { 'k.strict': SINGLE_STRICT },
+    })
+    h.add('k.strict', {
+      component: (props: { sessionId?: string; useSession?: (sel: (s: { sid: string }) => unknown) => unknown }) => {
+        // Reading through the kit hook proves the machinery wired THIS
+        // body's pinned session source, not another's.
+        seen.push({ sessionId: props.sessionId, read: props.useSession!(s => s.sid) })
+        return null
+      },
+      options: {},
+    })
+    const { view } = mountRoot(h, { 'k.maybe': SINGLE_MAYBE }, renderSlot => renderSlot('k.maybe', {}))
+    act(() => { h.current.set('s1') })
+    act(() => { h.current.set('s2') })
+    // The live s2 body reads s2; the retained s1 body (re-rendered through
+    // the pool pass) still reads s1 — the binding scope pinned its bundle.
+    expect(seen.filter(x => x.sessionId === 's2').at(-1)!.read).toBe('s2')
+    expect(seen.filter(x => x.sessionId === 's1').at(-1)!.read).toBe('s1')
+    // Ordering discriminator: the retained s1 body rendered AFTER s2 became
+    // current (otherwise the last s1 read could predate the switch and the
+    // pinning assertion above would pass vacuously on the live-era render).
+    const lastS1 = seen.map(x => x.sessionId).lastIndexOf('s1')
+    const firstS2 = seen.findIndex(x => x.sessionId === 's2')
+    expect(lastS1).toBeGreaterThan(firstS2)
+    expect(view.container.querySelectorAll('[data-keepalive]')).toHaveLength(2)
   })
 })

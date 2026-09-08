@@ -10,8 +10,8 @@ import {
   type SlotScope, type StoredEntry, type Translate,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  HostContext, SessionMaybeProvider, SessionProvider, SlotAssemblyError, maybeObservableHook,
-  observableHook, projectionHook, useHost, useSessionMaybeProvideInfo,
+  HostContext, SessionBindingScope, SessionMaybeProvider, SessionProvider, SlotAssemblyError,
+  maybeObservableHook, observableHook, projectionHook, useHost, useSessionMaybeProvideInfo,
 } from './session-provider.tsx'
 
 type InjectedProps = Record<string, unknown>
@@ -531,28 +531,54 @@ function SessionMaybeEntryBody({ entry, ownerProps, info, slotKey, slotInjected,
   return renderEntry(slotKey, Comp, kit, standard, injected, slotInjected, ownerProps, hookContext, hasHookContext)
 }
 
-/**
- * Session-maybe identity: adoption — the ONLY behavior (there is no
- * hold-identity-forever mode). An incarnation born session-less ADOPTS the
- * first session that arrives: identity holds across that one transition
- * (undefined → first id), so a blank shell's DOM survives the moment a
- * session appears. From then on the entry behaves exactly like a strict
- * session entry: switching to a DIFFERENT session remounts (component-local
- * state must not leak between sessions), and dropping back to no-session
- * remounts into a fresh blank incarnation, which will adopt again.
- * Component-local per-session state therefore clears by construction; state
- * that must SURVIVE a switch belongs in session-bound sources (machine,
- * store, hooks) — the existing layering rule, now load-bearing.
- */
-function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookContext, hasHookContext }: {
+/** Common props of the session-maybe entry modes (see SessionMaybeEntry). */
+interface SessionMaybeEntryProps {
   entry: StoredEntry
   ownerProps: object
   slotKey: string
   slotInjected: BoundSlotInject
   hookContext: unknown
   hasHookContext: boolean
-}) {
+}
+
+/**
+ * Session-maybe identity, dispatched by host capability:
+ *
+ * - WITHOUT `sessions.infoOf` (single-session hosts): epoch-remount
+ *   semantics — an incarnation born session-less adopts the first session,
+ *   every later transition (switch or loss) remounts.
+ *
+ * - WITH `sessions.infoOf` (multi-session hosts): LRU keep-alive — the live
+ *   body keeps the same pos-0 adoption, and a switch RETIRES the outgoing
+ *   body behind display:none pinned to ITS session's bundle instead of
+ *   unmounting it. Switching back promotes the retained slot (same React
+ *   key → same instance → scroll position and component-local state
+ *   survive); a bounded retained pool (live + KEEP_ALIVE_RETAINED) evicts
+ *   least-recently-used bodies, and sessions that stop resolving drop out.
+ */
+function SessionMaybeEntry(props: SessionMaybeEntryProps) {
   const info = useSessionMaybeProvideInfo()
+  const host = useHost()
+  const infoOf = host.sessions.infoOf
+  if (infoOf === undefined) return <LegacySessionMaybeEntry info={info} {...props} />
+  return <KeepAliveSessionMaybeEntry info={info} infoOf={infoOf} {...props} />
+}
+
+/**
+ * Epoch-remount session-maybe identity (single-session hosts): adoption —
+ * the ONLY behavior (there is no hold-identity-forever mode). An incarnation
+ * born session-less ADOPTS the first session that arrives: identity holds
+ * across that one transition (undefined → first id), so a blank shell's DOM
+ * survives the moment a session appears. From then on the entry behaves
+ * exactly like a strict session entry: switching to a DIFFERENT session
+ * remounts (component-local state must not leak between sessions), and
+ * dropping back to no-session remounts into a fresh blank incarnation,
+ * which will adopt again. Component-local per-session state therefore
+ * clears by construction; state that must SURVIVE a switch belongs in
+ * session-bound sources (machine, store, hooks) — the existing layering
+ * rule, now load-bearing.
+ */
+function LegacySessionMaybeEntry({ info, ...rest }: SessionMaybeEntryProps & { info: SessionMaybeProvideInfo }) {
   // The child key is an incarnation counter, NOT the session id: adoption
   // must keep the key constant across undefined → first id. Bookkeeping
   // lives in this stable (unkeyed) wrapper via the render-phase setState
@@ -579,15 +605,128 @@ function SessionMaybeEntry({ entry, ownerProps, slotKey, slotInjected, hookConte
   return (
     <SessionMaybeEntryBody
       key={epoch}
-      entry={entry}
-      ownerProps={ownerProps}
       info={info}
-      slotKey={slotKey}
-      slotInjected={slotInjected}
-      hookContext={hookContext}
-      hasHookContext={hasHookContext}
+      {...rest}
     />
   )
+}
+
+/**
+ * Retained-session budget beside the live body: 1 live + 2 retained mounts.
+ * Bounds DOM and subscription cost of keep-alive while covering the recent
+ * working set of a typical switch pattern (previous + next conversation).
+ */
+const KEEP_ALIVE_RETAINED = 2
+
+/** One mounted session-maybe body: stable React key + the session it renders. */
+interface KeepAliveSlot {
+  /** Minted at slot creation, kept through adoption; identity of the mounted body. */
+  readonly key: string
+  /** The slot's session; undefined only for the live blank slot. */
+  readonly sessionId: string | undefined
+}
+
+/** Keep-alive pool bookkeeping; seq mints keys deterministically (state-derived). */
+interface KeepAliveState {
+  readonly seq: number
+  /** pool[0] = live slot (follows the root projection, adoption-capable); pool[1..] retained (pinned). */
+  readonly pool: readonly KeepAliveSlot[]
+}
+
+const INITIAL_KEEP_ALIVE: KeepAliveState = { seq: 1, pool: [{ key: 'live-0', sessionId: undefined }] }
+
+/** Retire the live slot into the retained list; dropped outright when its session no longer resolves. */
+function retireLive(
+  live: KeepAliveSlot,
+  pool: readonly KeepAliveSlot[],
+  infoOf: (id: string) => SessionMaybeProvideInfo | undefined,
+): readonly KeepAliveSlot[] {
+  return live.sessionId !== undefined && infoOf(live.sessionId) !== undefined
+    ? [live, ...pool.slice(1)]
+    : pool.slice(1)
+}
+
+/** Visible pool wrapper: layout-neutral like the outlet anchor (see ANCHOR_STYLE). */
+const CONTENTS_STYLE = { display: 'contents' } as const
+
+/** Retained pool wrapper: mounted but laid out nowhere until promoted again. */
+const HIDDEN_STYLE = { display: 'none' } as const
+
+/**
+ * LRU keep-alive session-maybe identity (multi-session hosts). The pool
+ * holds the live body plus the most recently retired ones; transitions run
+ * in the render-phase setState form (same convergence contract as the
+ * legacy epoch bookkeeping — pure functions of (state, current), no
+ * external counters). Bodies render under SessionBindingScope so retained
+ * trees read THEIR session's bundle through the binding context, and the
+ * display toggle (contents/none) is the whole show/hide mechanism — React
+ * reconciles the same keyed subtree, never rebuilding it.
+ */
+function KeepAliveSessionMaybeEntry({ info, infoOf, ...rest }: SessionMaybeEntryProps & {
+  info: SessionMaybeProvideInfo
+  infoOf: (id: string) => SessionMaybeProvideInfo | undefined
+}) {
+  const [state, setState] = useState<KeepAliveState>(INITIAL_KEEP_ALIVE)
+  const current = info.sessionId
+  let { seq, pool } = state
+  let next: readonly KeepAliveSlot[] | undefined
+  // INITIAL_KEEP_ALIVE always mounts pos-0 and every transition keeps it:
+  // the live slot is structurally present (indexed-access strictness only).
+  const live = pool[0]!
+  if (current !== live.sessionId) {
+    if (live.sessionId === undefined) {
+      const hit = pool.slice(1).find(slot => slot.sessionId === current)
+      if (hit === undefined) {
+        // Pos-0 adoption: the blank-born live slot adopts the arriving
+        // session (same key — the blank shell's DOM survives the first
+        // selection).
+        next = [{ key: live.key, sessionId: current }, ...pool.slice(1)]
+      } else {
+        // The incoming selection is a retained session: promote it (its
+        // preserved state returns) — the blank live slot has nothing to
+        // retain and is dropped, which also keeps the pool duplicate-free.
+        next = [hit, ...pool.slice(1).filter(slot => slot !== hit)]
+      }
+    } else if (current === undefined) {
+      // Session loss: the adopted body retires behind display:none; a fresh
+      // blank live slot mounts and will adopt anew.
+      next = [{ key: `live-${seq}`, sessionId: undefined }, ...retireLive(live, pool, infoOf)]
+      seq += 1
+    } else {
+      const hit = pool.slice(1).find(slot => slot.sessionId === current)
+      if (hit !== undefined) {
+        // Switch back to a retained session: promote its slot (same key →
+        // same instance → state survives); the outgoing live slot retires.
+        next = [hit, ...retireLive(live, pool, infoOf).filter(slot => slot !== hit)]
+      } else {
+        // Fresh session: fresh live slot; the outgoing live slot retires.
+        next = [{ key: `live-${seq}`, sessionId: current }, ...retireLive(live, pool, infoOf)]
+        seq += 1
+      }
+    }
+  }
+  // Retained hygiene: drop slots whose session no longer resolves (dead
+  // sessions must unmount) and cap the pool at the LRU budget (tail = LRU).
+  const base = next ?? pool
+  const retained = base.slice(1)
+    .filter(slot => infoOf(slot.sessionId!) !== undefined)
+    .slice(0, KEEP_ALIVE_RETAINED)
+  if (retained.length !== base.length - 1) next = [base[0]!, ...retained]
+  if (next !== undefined && next !== pool) setState({ seq, pool: next })
+
+  return (next ?? pool).map((slot, i) => {
+    // The live slot follows the root projection (identity-stable per
+    // session); retained slots pin THEIR session's bundle so hidden bodies
+    // keep rendering their own session, never the current one.
+    const slotInfo = i === 0 ? info : infoOf(slot.sessionId!)!
+    return (
+      <SessionBindingScope key={slot.key} info={slotInfo}>
+        <div data-keepalive={slot.sessionId ?? 'blank'} style={i === 0 ? CONTENTS_STYLE : HIDDEN_STYLE}>
+          <SessionMaybeEntryBody info={slotInfo} {...rest} />
+        </div>
+      </SessionBindingScope>
+    )
+  })
 }
 
 /** Adoption bookkeeping of one session-maybe outlet (see SessionMaybeEntry). */

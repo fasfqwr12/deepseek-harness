@@ -19,8 +19,9 @@ import {
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator, SessionFormatUnsupportedError,
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
   type SessionInspection, type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
-  type StoredPrefix,
+  type StoredPrefix, type StoredTail,
 } from '@deepseek-ai/dsh-session-persistence'
+import { decodeStorageRecord } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
   encodeSegment, eventLines, logPath, logSuffix, parseHeaderMeta, projectDir, scanLog, sessionDir,
@@ -29,6 +30,7 @@ import {
 } from './format.ts'
 import {
   compressZstdFrame, createZstdFrameDecoder, decompressZstdFrame, decompressZstdPrefix, scanZstdFrames,
+  type ZstdFrameRange,
 } from './zstd.ts'
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 
@@ -48,6 +50,44 @@ function assertZstdHeaderFrame(plaintext: Buffer): void {
   if (plaintext.length === 0 || plaintext.indexOf(0x0A) !== plaintext.length - 1) {
     throw new Error('corrupt Zstandard session log: first frame is not exactly one header line')
   }
+}
+
+/**
+ * Decode one tail window of complete event-batch frames into events. The
+ * window starts at a frame boundary (whole JSONL lines, writer-aligned), so
+ * unlike the whole-log scanner this parser validates relative seq
+ * contiguity inside the window instead of assuming it starts at seq 0.
+ * @param plaintexts - frame plaintexts in log order; each is whole lines.
+ * @returns the window's contiguous events, oldest first.
+ */
+function decodeTailEventWindow(plaintexts: readonly Buffer[]): SessionEvent[] {
+  const text = Buffer.concat(plaintexts)
+  const events: SessionEvent[] = []
+  let lineStart = 0
+  let line = 0
+  for (;;) {
+    const newline = text.indexOf(0x0A, lineStart)
+    if (newline === -1) break
+    line += 1
+    let decoded: SessionEvent[]
+    try {
+      decoded = decodeStorageRecord(JSON.parse(text.toString('utf8', lineStart, newline)))
+    } catch {
+      throw new Error(`corrupt Zstandard session log: unparsable event line ${line} in tail window`)
+    }
+    for (const event of decoded) {
+      const previous = events.at(-1)
+      if (previous !== undefined && event.seq !== previous.seq + 1) {
+        throw new Error(`corrupt Zstandard session log: seq gap in tail window at line ${line}`)
+      }
+      events.push(event)
+    }
+    lineStart = newline + 1
+  }
+  if (lineStart !== text.length) {
+    throw new Error('corrupt Zstandard session log: complete frame ends mid-line in tail window')
+  }
+  return events
 }
 
 /** Loader schema for the JSONL artifact's physical encoding. */
@@ -199,6 +239,16 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return this.coordinator.readFrom(id, fromSeq, signal)
   }
 
+  // The Zstandard container is frame-addressable from the end: the tail hook
+  // decodes only the header frame and the tail frames (see loadStoredTail).
+  override readTail(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    return this.coordinator.readTail(id, maxEvents, signal)
+  }
+
   // One method serves both public `list` and the backend hook; delegating it to
   // the coordinator would call this hook recursively.
 
@@ -213,6 +263,94 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
     return this.readPrefix(path, id, signal)
+  }
+
+  /**
+   * Tail-capable read behind the service's `readTail`: for the default
+   * Zstandard encoding, structurally scan the concatenated frames without
+   * decompressing them, decode only the header frame and the tail frames
+   * (exponentially widening the window until the event budget is met or the
+   * first event frame is reached), and return the newest events plus whether
+   * anything older remains. A torn final frame is ignored, matching the
+   * committed-prefix semantics of every other read. The plaintext encoding
+   * falls back to one whole stored-prefix read and slices the tail.
+   * @param id - persisted session id to resolve.
+   * @param maxEvents - event budget for the window (pre-validated by the coordinator).
+   * @param signal - optional cancellation for the read/decode work.
+   * @returns the header, the newest events, and whether older events exist.
+   */
+  async loadStoredTail(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    if (this.compression !== 'zstd') {
+      const prefix = await this.readPrefix(path, id, signal)
+      return {
+        meta: prefix.meta,
+        events: maxEvents === 0 ? [] : prefix.events.slice(-maxEvents),
+        hasMore: prefix.events.length > maxEvents,
+      }
+    }
+    return this.readZstdTail(path, id, maxEvents, signal)
+  }
+
+  /** Decode only the header frame and the tail frames of one Zstandard log. */
+  private async readZstdTail(
+    path: string,
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    const { buffer } = await this.readStableFile(path, signal)
+    signal?.throwIfAborted()
+    const { frames } = scanZstdFrames(buffer)
+    signal?.throwIfAborted()
+    const headerFrame = frames[0]
+    if (headerFrame === undefined) throw new Error('empty or header-less Zstandard session log')
+    // Frame 0 is the header frame; frames 1..n hold event batches (whole lines).
+    const lastEventFrame = frames.length - 1
+    const headerPlaintext = await decompressZstdFrame(buffer.subarray(headerFrame.start, headerFrame.end))
+    signal?.throwIfAborted()
+    assertZstdHeaderFrame(headerPlaintext)
+    const meta = parseHeaderMeta(headerPlaintext.subarray(0, -1).toString('utf8'))
+    if (meta === undefined) throw new Error(`corrupt session log: invalid header line in "${path}"`)
+    await this.assertStoredIdentity(path, meta, id, signal)
+    signal?.throwIfAborted()
+    if (lastEventFrame < 1 || maxEvents === 0) {
+      return { meta, events: [], hasMore: lastEventFrame >= 1 }
+    }
+
+    // Exponentially widen the tail window (1, 3, 7, … frames) until the event
+    // budget is met or the first event frame is reached. Each round decodes
+    // only newly covered frames and re-parses the window, bounding both the
+    // plaintext held in memory and the wasted decode work.
+    const decodedFrames = new Map<number, Buffer>()
+    let windowStart = lastEventFrame
+    let events: SessionEvent[] = []
+    for (;;) {
+      for (let index = windowStart; index <= lastEventFrame; index += 1) {
+        if (decodedFrames.has(index)) continue
+        const frame = frames[index] as ZstdFrameRange
+        decodedFrames.set(index, await decompressZstdFrame(buffer.subarray(frame.start, frame.end)))
+        signal?.throwIfAborted()
+      }
+      events = decodeTailEventWindow(
+        [...decodedFrames.entries()].sort((a, b) => a[0] - b[0]).map(([, plaintext]) => plaintext),
+      )
+      signal?.throwIfAborted()
+      if (events.length >= maxEvents || windowStart === 1) break
+      const windowSize = lastEventFrame - windowStart + 1
+      windowStart = Math.max(1, windowStart - windowSize)
+    }
+    const truncated = events.length > maxEvents
+    if (truncated) events = events.slice(-maxEvents)
+    return { meta, events, hasMore: truncated || windowStart > 1 }
   }
 
   /**

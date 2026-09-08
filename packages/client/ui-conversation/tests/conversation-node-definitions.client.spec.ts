@@ -285,12 +285,17 @@ describe('built-in conversation node Definitions', () => {
     expect((settled?.data as ToolChatData).root).toMatchObject({ kind: 'tool-result', callId: 'root' })
 
     const history = assembler([
+      // Dispatch events carry turn/step stamps the way every real delivery
+      // path does (live appends stamp at source; stored logs are backfilled
+      // by the persistence coordinator before reaching the client).
       at(14, 'tool/code-dispatch-start', {
         rootCallId: 'history-root',
         parentCallId: 'history-root',
         subCallId: 'child',
         name: 'read',
         arguments: { path: 'README.md' },
+        turn: 2,
+        step: 1,
       }),
       at(15, 'tool/code-dispatch', {
         rootCallId: 'history-root',
@@ -300,6 +305,8 @@ describe('built-in conversation node Definitions', () => {
         arguments: { path: 'README.md' },
         isError: false,
         content: [{ type: 'text', text: 'contents' }],
+        turn: 2,
+        step: 1,
       }),
       at(16, 'tool/result', {
         turn: 2,
@@ -338,10 +345,116 @@ describe('built-in conversation node Definitions', () => {
       subCallId: 'second-child',
       name: 'write',
       arguments: { path: 'out.txt' },
+      turn: 2,
+      step: 1,
     }))
     history.flush()
     const withSecondChild = node(snapshot(history), 'tool-call')
     expect((withSecondChild?.data as ToolChatData).root.subCalls[0]).toBe(firstChild)
+  })
+
+  it('routes a model callId reused across steps of one turn into separate tool nodes', () => {
+    // Providers restart callId numbering per response, so step 2 of the same
+    // turn reuses step 1's callId. Routing by callId alone made the second
+    // tool/call a duplicate start ("received more than one start Match");
+    // the turn:step:callId namespace keeps each step's call its own node.
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'tool/call', { turn: 1, step: 1, callId: 'sg_call_0', name: 'read', arguments: '{}' }),
+      at(4, 'tool/result', {
+        turn: 1,
+        step: 1,
+        message: toolResult('sg_call_0', 'first'),
+      }, { surfaceOp: 'append' }),
+      at(5, 'step/end', { turn: 1, step: 1 }),
+      at(6, 'step/start', { turn: 1, step: 2 }),
+      at(7, 'tool/call', { turn: 1, step: 2, callId: 'sg_call_0', name: 'write', arguments: '{}' }),
+      at(8, 'tool/result', {
+        turn: 1,
+        step: 2,
+        message: toolResult('sg_call_0', 'second'),
+      }, { surfaceOp: 'append' }),
+      at(9, 'step/end', { turn: 1, step: 2 }),
+      at(10, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+    const current = snapshot(value)
+    const tools = [...current.nodes.values()].filter(candidate => candidate.kind === 'tool-call')
+    expect(tools).toHaveLength(2)
+    const roots = tools.map(candidate => (candidate.data as ToolChatData).root)
+    expect(roots.map(root => 'kind' in root ? root.call?.name : root.name))
+      .toEqual(['read', 'write'])
+  })
+
+  it('routes nested dispatch with a reused root callId through stamped turn/step', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'tool/call', { turn: 1, step: 1, callId: 'g_call_0', name: 'run_code', arguments: '{}' }),
+      at(4, 'tool/code-dispatch-start', {
+        rootCallId: 'g_call_0',
+        parentCallId: 'g_call_0',
+        subCallId: 'g_call_0:code:1',
+        name: 'read',
+        arguments: { path: 'a' },
+        turn: 1,
+        step: 1,
+      }),
+      at(5, 'tool/code-dispatch', {
+        rootCallId: 'g_call_0',
+        parentCallId: 'g_call_0',
+        subCallId: 'g_call_0:code:1',
+        name: 'read',
+        arguments: { path: 'a' },
+        isError: false,
+        content: [{ type: 'text', text: 'a' }],
+        turn: 1,
+        step: 1,
+      }),
+      at(6, 'tool/result', {
+        turn: 1,
+        step: 1,
+        message: toolResult('g_call_0', 'first'),
+      }, { surfaceOp: 'append' }),
+      at(7, 'step/end', { turn: 1, step: 1 }),
+      at(8, 'step/start', { turn: 1, step: 2 }),
+      at(9, 'tool/call', { turn: 1, step: 2, callId: 'g_call_0', name: 'run_code', arguments: '{}' }),
+      at(10, 'tool/code-dispatch-start', {
+        rootCallId: 'g_call_0',
+        parentCallId: 'g_call_0',
+        subCallId: 'g_call_0:code:1',
+        name: 'write',
+        arguments: { path: 'b' },
+        turn: 1,
+        step: 2,
+      }),
+      at(11, 'tool/code-dispatch', {
+        rootCallId: 'g_call_0',
+        parentCallId: 'g_call_0',
+        subCallId: 'g_call_0:code:1',
+        name: 'write',
+        arguments: { path: 'b' },
+        isError: false,
+        content: [{ type: 'text', text: 'b' }],
+        turn: 1,
+        step: 2,
+      }),
+      at(12, 'tool/result', {
+        turn: 1,
+        step: 2,
+        message: toolResult('g_call_0', 'second'),
+      }, { surfaceOp: 'append' }),
+      at(13, 'step/end', { turn: 1, step: 2 }),
+      at(14, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+    const current = snapshot(value)
+    const tools = [...current.nodes.values()].filter(candidate => candidate.kind === 'tool-call')
+    expect(tools).toHaveLength(2)
+    const roots = tools.map(candidate => (candidate.data as ToolChatData).root)
+    // Each step's run_code keeps its own nested subcall — no cross-step merge.
+    // Settled children are tool-result blocks; the name lives under `call.name`.
+    expect(roots.map(root => root.subCalls.map(child => 'kind' in child ? child.call?.name : child.name)))
+      .toEqual([['read'], ['write']])
   })
 
   it('prepends an older turn without replacing already materialized nodes', () => {
@@ -887,10 +1000,12 @@ describe('built-in conversation node Definitions', () => {
     const value = assembler([
       at(12, 'tool/code-dispatch-start', {
         rootCallId: 'root', parentCallId: 'root', subCallId: 'child', name: 'read_file', arguments: { path: 'a' },
+        turn: 1, step: 1,
       }),
       at(13, 'tool/code-dispatch', {
         rootCallId: 'root', parentCallId: 'root', subCallId: 'child', name: 'read_file', arguments: { path: 'a' },
         isError: false, content: [{ type: 'text', text: 'child result' }],
+        turn: 1, step: 1,
       }),
       at(14, 'tool/result', {
         turn: 1,

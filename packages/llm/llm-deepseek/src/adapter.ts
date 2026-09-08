@@ -117,6 +117,10 @@ function modelInfo(provider: string, model: DeepSeekCatalogModel): LlmModelInfo 
     name: model.name ?? model.id,
     ...model.description === undefined ? {} : { description: model.description },
     inputModalities: ['text'],
+    // DeepSeek chat-completions wire has no built-in web search; rely on DSH's
+    // web_search tool instead so Auto routing does not dead-end waiting on an
+    // upstream search feature this endpoint does not expose.
+    nativeSearch: false,
   }
 }
 

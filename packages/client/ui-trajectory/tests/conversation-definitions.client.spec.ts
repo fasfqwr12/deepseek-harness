@@ -165,6 +165,8 @@ describe('Trajectory conversation Definitions', () => {
         subCallId: 'child',
         name: 'read',
         arguments: { path: 'README.md' },
+        turn: 1,
+        step: 1,
       }),
       at(6, 'tool/code-dispatch', {
         rootCallId: 'root-a',
@@ -173,6 +175,8 @@ describe('Trajectory conversation Definitions', () => {
         name: 'read',
         arguments: { path: 'README.md' },
         content: [{ type: 'text', text: 'contents' }],
+        turn: 1,
+        step: 1,
       }),
       at(7, 'step/end', { turn: 1, step: 1 }),
     ]))

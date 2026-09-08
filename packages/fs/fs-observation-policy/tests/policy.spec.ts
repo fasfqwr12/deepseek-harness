@@ -29,6 +29,24 @@ async function setup() {
   return { ctx, fiber }
 }
 
+async function dispatchWrite(ctx: Context, t: FsTarget, actor: object | undefined): Promise<{ intent: FsWriteIntent | undefined, nextCalled: boolean }> {
+  let nextCalled = false
+  const intent = await ctx.waterfall('fs/write-intent', t, actor, () => {
+    nextCalled = true
+    return undefined
+  })
+  return { intent, nextCalled }
+}
+
+async function dispatchEdit(ctx: Context, t: FsTarget, actor: object | undefined): Promise<{ intent: { version: FsVersion } | undefined, nextCalled: boolean }> {
+  let nextCalled = false
+  const intent = await ctx.waterfall('fs/edit-intent', t, actor, () => {
+    nextCalled = true
+    return undefined
+  })
+  return { intent, nextCalled }
+}
+
 describe('registration / disposal', () => {
   it('registers no service API (it is a plugin, not ctx.fsPolicy)', async () => {
     const { ctx } = await setup()
@@ -39,28 +57,25 @@ describe('registration / disposal', () => {
     // It mounts immediately even with nothing else in the context.
     const ctx = new Context()
     await ctx.plugin(FsPolicy)
-    // The listener is live: an unobserved write decides createIfAbsent.
-    expect(await writeIntent(ctx, target('a.txt'), undefined)).toEqual({ kind: 'createIfAbsent' })
+    expect(await writeIntent(ctx, target('a.txt'), undefined)).toBeUndefined()
   })
 })
 
 describe('write-intent decision', () => {
-  it('an unobserved target decides createIfAbsent', async () => {
+  it('an unobserved target falls through to the bare provider', async () => {
     const { ctx } = await setup()
-    expect(await writeIntent(ctx, target('a.txt'), ownerExec({}))).toEqual({ kind: 'createIfAbsent' })
+    expect(await dispatchWrite(ctx, target('a.txt'), ownerExec({}))).toEqual({ intent: undefined, nextCalled: true })
   })
 
-  it('a no-owner actor decides createIfAbsent', async () => {
+  it('a no-owner actor falls through to the bare provider', async () => {
     const { ctx } = await setup()
-    expect(await writeIntent(ctx, target('a.txt'), undefined)).toEqual({ kind: 'createIfAbsent' })
-    expect(await writeIntent(ctx, target('a.txt'), {})).toEqual({ kind: 'createIfAbsent' })
+    expect(await dispatchWrite(ctx, target('a.txt'), undefined)).toEqual({ intent: undefined, nextCalled: true })
+    expect(await dispatchWrite(ctx, target('a.txt'), {})).toEqual({ intent: undefined, nextCalled: true })
   })
 
-  it('an actor with an agent but no session has no owner (createIfAbsent)', async () => {
-    // The middle optional-chain rung: agent present, session undefined ⇒ owner
-    // undefined ⇒ unobservable, so a write can only be a blind create.
+  it('an actor with an agent but no session falls through to the bare provider', async () => {
     const { ctx } = await setup()
-    expect(await writeIntent(ctx, target('a.txt'), { agent: {} })).toEqual({ kind: 'createIfAbsent' })
+    expect(await dispatchWrite(ctx, target('a.txt'), { agent: {} })).toEqual({ intent: undefined, nextCalled: true })
   })
 
   it('an observed target decides replaceIfVersion at the observed version', async () => {
@@ -70,28 +85,29 @@ describe('write-intent decision', () => {
     expect(await writeIntent(ctx, target('a.txt'), exec)).toEqual({ kind: 'replaceIfVersion', version: 'v7' })
   })
 
-  it('a target observed absent decides createIfAbsent', async () => {
+  it('an unobserved or absent target uses the bare provider', async () => {
     const { ctx } = await setup()
     const exec = ownerExec({})
+    expect(await writeIntent(ctx, target('a.txt'), exec)).toBeUndefined()
     ctx.emit('fs/observed', target('a.txt'), absent, exec)
-    expect(await writeIntent(ctx, target('a.txt'), exec)).toEqual({ kind: 'createIfAbsent' })
+    expect(await writeIntent(ctx, target('a.txt'), exec)).toBeUndefined()
   })
 })
 
 describe('edit-intent decision', () => {
-  it('rejects an unread edit with FS_NOT_OBSERVED', async () => {
+  it('allows an unread edit to use the bare provider', async () => {
     const { ctx } = await setup()
-    await expect(editIntent(ctx, target('a.txt'), ownerExec({}))).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+    expect(await editIntent(ctx, target('a.txt'), ownerExec({}))).toBeUndefined()
   })
 
-  it('rejects an edit with no owner (cannot prove prior observation)', async () => {
+  it('allows an edit with no owner to use the bare provider', async () => {
     const { ctx } = await setup()
-    await expect(editIntent(ctx, target('a.txt'), undefined)).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+    expect(await editIntent(ctx, target('a.txt'), undefined)).toBeUndefined()
   })
 
-  it('rejects an edit whose actor has an agent but no session (no owner)', async () => {
+  it('allows an edit whose actor has an agent but no session', async () => {
     const { ctx } = await setup()
-    await expect(editIntent(ctx, target('a.txt'), { agent: {} })).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+    expect(await editIntent(ctx, target('a.txt'), { agent: {} })).toBeUndefined()
   })
 
   it('returns the observed version as the CAS basis after an observation', async () => {
@@ -101,11 +117,11 @@ describe('edit-intent decision', () => {
     expect(await editIntent(ctx, target('a.txt'), exec)).toEqual({ version: 'v3' })
   })
 
-  it('rejects editing a target observed absent with FS_NOT_FOUND', async () => {
+  it('allows editing a target observed absent through the bare provider', async () => {
     const { ctx } = await setup()
     const exec = ownerExec({})
     ctx.emit('fs/observed', target('a.txt'), absent, exec)
-    await expect(editIntent(ctx, target('a.txt'), exec)).rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
+    expect(await dispatchEdit(ctx, target('a.txt'), exec)).toEqual({ intent: undefined, nextCalled: true })
   })
 })
 
@@ -131,8 +147,8 @@ describe('observed-state is the prior-observation record', () => {
   it('a no-owner observation records nothing', async () => {
     const { ctx } = await setup()
     ctx.emit('fs/observed', target('a.txt'), present('v0'), undefined)
-    // Still unobserved for any owner.
-    await expect(editIntent(ctx, target('a.txt'), ownerExec({}))).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+    // Still unobserved for any owner, so the bare provider is used.
+    expect(await editIntent(ctx, target('a.txt'), ownerExec({}))).toBeUndefined()
   })
 
   it('supports present → absent → present transitions for one owner', async () => {
@@ -143,8 +159,8 @@ describe('observed-state is the prior-observation record', () => {
     expect(await writeIntent(ctx, a, exec)).toEqual({ kind: 'replaceIfVersion', version: 'v1' })
 
     ctx.emit('fs/observed', a, absent, exec)
-    expect(await writeIntent(ctx, a, exec)).toEqual({ kind: 'createIfAbsent' })
-    await expect(editIntent(ctx, a, exec)).rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
+    expect(await writeIntent(ctx, a, exec)).toBeUndefined()
+    expect(await editIntent(ctx, a, exec)).toBeUndefined()
 
     ctx.emit('fs/observed', a, present('v2'), exec)
     expect(await editIntent(ctx, a, exec)).toEqual({ version: 'v2' })
@@ -157,7 +173,7 @@ describe('multi-owner isolation', () => {
     const a = ownerExec({})
     const b = ownerExec({})
     ctx.emit('fs/observed', target('a.txt'), present('v0'), a)
-    await expect(editIntent(ctx, target('a.txt'), b)).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+    expect(await editIntent(ctx, target('a.txt'), b)).toBeUndefined()
     expect(await editIntent(ctx, target('a.txt'), a)).toEqual({ version: 'v0' })
   })
 
@@ -166,22 +182,16 @@ describe('multi-owner isolation', () => {
     const a = ownerExec({})
     const b = ownerExec({})
     ctx.emit('fs/observed', target('a.txt'), present('v0'), a) // A observed v0
-    // B never observed → createIfAbsent; A still holds v0 → replaceIfVersion.
-    expect(await writeIntent(ctx, target('a.txt'), b)).toEqual({ kind: 'createIfAbsent' })
+    // B never observed → bare provider; A still holds v0 → replaceIfVersion.
+    expect(await dispatchWrite(ctx, target('a.txt'), b)).toEqual({ intent: undefined, nextCalled: true })
     expect(await writeIntent(ctx, target('a.txt'), a)).toEqual({ kind: 'replaceIfVersion', version: 'v0' })
   })
 })
 
 describe('single-slot, first-wins', () => {
-  it('fully decides the slot without calling next() (the bare default is unreached)', async () => {
+  it('calls next() for an unobserved target', async () => {
     const { ctx } = await setup()
-    let defaultRan = false
-    const intent = await ctx.waterfall('fs/write-intent', target('a.txt'), ownerExec({}), () => {
-      defaultRan = true
-      return undefined
-    })
-    expect(intent).toEqual({ kind: 'createIfAbsent' })
-    expect(defaultRan).toBe(false)
+    expect(await dispatchWrite(ctx, target('a.txt'), ownerExec({}))).toEqual({ intent: undefined, nextCalled: true })
   })
 
   it('a SECOND decider registered AFTER fs-observation-policy is not reached (first-wins short-circuit)', async () => {
@@ -200,7 +210,7 @@ describe('single-slot, first-wins', () => {
     expect(secondRan).toBe(false)
   })
 
-  it('a SECOND write-intent decider registered AFTER fs-observation-policy is not reached', async () => {
+  it('a SECOND write-intent decider can run after an unobserved target falls through', async () => {
     const { ctx } = await setup()
     let secondRan = false
     ctx.on('fs/write-intent', () => {
@@ -208,7 +218,7 @@ describe('single-slot, first-wins', () => {
       return Promise.resolve(undefined)
     })
     await writeIntent(ctx, target('a.txt'), ownerExec({}))
-    expect(secondRan).toBe(false)
+    expect(secondRan).toBe(true)
   })
 })
 
@@ -222,8 +232,8 @@ describe('disposal releases recorded state (HMR safety)', () => {
     await fiber.dispose()
 
     await ctx.plugin(FsPolicy)
-    // Same owner object, but state was released on disposal.
-    await expect(editIntent(ctx, target('a.txt'), exec)).rejects.toMatchObject({ code: 'FS_NOT_OBSERVED' })
+    // Same owner object, but state was released on disposal, so it falls through.
+    expect(await dispatchEdit(ctx, target('a.txt'), exec)).toEqual({ intent: undefined, nextCalled: true })
   })
 
   it('no listeners remain after disposal (the gate no longer decides)', async () => {

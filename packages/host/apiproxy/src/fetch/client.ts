@@ -228,7 +228,9 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /** Whether a unary call uses the transport health deadline or only caller/connection cancellation. */
-type UnaryTimeoutPolicy = 'default' | 'caller-signal-only'
+type UnaryTimeoutPolicy = 'default' | 'fast' | 'caller-signal-only'
+
+const FAST_TIMEOUT_MS = 8_000
 
 /** URL base for in-process handler injection (fake authority, opencode precedent). */
 const INTERNAL_BASE = 'http://dsh.internal'
@@ -310,11 +312,11 @@ export abstract class AbstractApiClient implements IApiClient {
     signal: AbortSignal | undefined,
     timeoutPolicy: UnaryTimeoutPolicy = 'default',
   ): Promise<Response> {
-    const requestSignal = timeoutPolicy === 'default'
-      ? signal === undefined
-        ? AbortSignal.timeout(this.timeoutMs)
-        : AbortSignal.any([AbortSignal.timeout(this.timeoutMs), signal])
-      : signal
+    const requestSignal = timeoutPolicy === 'caller-signal-only'
+      ? signal
+      : signal === undefined
+        ? AbortSignal.timeout(timeoutPolicy === 'fast' ? FAST_TIMEOUT_MS : this.timeoutMs)
+        : AbortSignal.any([AbortSignal.timeout(timeoutPolicy === 'fast' ? FAST_TIMEOUT_MS : this.timeoutMs), signal])
     const response = await this.doFetch(new URL(path, this.resolveBase()), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -413,14 +415,18 @@ export abstract class AbstractApiClient implements IApiClient {
     list: (payload, signal) => this.callUnary('session.list', payload, signal),
     search: (payload, signal) => this.callUnary('session.search', payload, signal),
     create: (payload, signal) => this.callUnary('session.create', payload, signal),
+    // History serves a whole detached page and may fall back to a whole-log
+    // read of multi-MB session files (tail window miss): the 8s fast deadline
+    // turned that path into "signal timed out" for large sessions. The default
+    // deadline keeps small sessions snappy while letting large ones land.
     history: (payload, signal) => this.callUnary('session.history', payload, signal),
-    models: (payload, signal) => this.callUnary('session.models', payload, signal),
-    selectModel: (payload, signal) => this.callUnary('session.selectModel', payload, signal),
-    rename: (payload, signal) => this.callUnary('session.rename', payload, signal),
-    fork: (payload, signal) => this.callUnary('session.fork', payload, signal),
+    models: (payload, signal) => this.callUnary('session.models', payload, signal, 'fast'),
+    selectModel: (payload, signal) => this.callUnary('session.selectModel', payload, signal, 'fast'),
+    rename: (payload, signal) => this.callUnary('session.rename', payload, signal, 'fast'),
+    fork: (payload, signal) => this.callUnary('session.fork', payload, signal, 'fast'),
     prompt: (payload, signal) => this.callUnary('session.prompt', payload, signal),
     attachment: (payload, signal) => this.callUnary('session.attachment', payload, signal),
-    updateQueue: (payload, signal) => this.callUnary('session.updateQueue', payload, signal),
+    updateQueue: (payload, signal) => this.callUnary('session.updateQueue', payload, signal, 'fast'),
     cancel: (payload, signal) => this.callUnary('session.cancel', payload, signal),
   }
 
@@ -444,13 +450,13 @@ export abstract class AbstractApiClient implements IApiClient {
   }
 
   readonly workspace: IApiClient['workspace'] = {
-    list: (payload, signal) => this.callUnary('workspace.list', payload, signal),
-    create: (payload, signal) => this.callUnary('workspace.create', payload, signal),
-    rename: (payload, signal) => this.callUnary('workspace.rename', payload, signal),
-    delete: (payload, signal) => this.callUnary('workspace.delete', payload, signal),
-    insertBefore: (payload, signal) => this.callUnary('workspace.insertBefore', payload, signal),
-    insertSessionBefore: (payload, signal) => this.callUnary('workspace.insertSessionBefore', payload, signal),
-    archiveSession: (payload, signal) => this.callUnary('workspace.archiveSession', payload, signal),
+    list: (payload, signal) => this.callUnary('workspace.list', payload, signal, 'fast'),
+    create: (payload, signal) => this.callUnary('workspace.create', payload, signal, 'fast'),
+    rename: (payload, signal) => this.callUnary('workspace.rename', payload, signal, 'fast'),
+    delete: (payload, signal) => this.callUnary('workspace.delete', payload, signal, 'fast'),
+    insertBefore: (payload, signal) => this.callUnary('workspace.insertBefore', payload, signal, 'fast'),
+    insertSessionBefore: (payload, signal) => this.callUnary('workspace.insertSessionBefore', payload, signal, 'fast'),
+    archiveSession: (payload, signal) => this.callUnary('workspace.archiveSession', payload, signal, 'fast'),
   }
 
   readonly skills: IApiClient['skills'] = {

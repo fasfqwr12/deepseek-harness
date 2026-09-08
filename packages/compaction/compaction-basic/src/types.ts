@@ -10,7 +10,7 @@ import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 export interface CompactionPolicyConfig {
   /** Compact at this fraction of the model's context window. Defaults to `0.8`. */
   thresholdRatio?: number
-  /** Recent context retained as a fraction of the model's window. Defaults to `0.16`. */
+  /** Recent context retained as a fraction of the model's window. Defaults to `0.25`. */
   retainRatio?: number
   /** Absolute recent-context budget; mutually exclusive with `retainRatio`. */
   retainTokens?: number

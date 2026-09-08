@@ -76,6 +76,10 @@ export async function executeToolCalls(
       arguments: parseArguments(block.arguments),
       agent,
       signal,
+      // 模型发出的 callId 只在 step 内唯一（provider 每次响应重新编号），
+      // 透传 turn/step 供 Code Mode 等子事件日志做命名空间。
+      turn,
+      step,
     },
   }))
 

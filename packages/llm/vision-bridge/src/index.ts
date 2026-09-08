@@ -18,7 +18,7 @@ import { OpenAiCompatibleVisionBridge, type ResolvedVisionBridgeConfig, type Vis
 export const name = 'vision-bridge'
 
 /** Services this plugin requires before it can register the bridge and tool. */
-export const inject = ['tools', 'fs']
+export const inject = ['tools', 'fs', 'credentials']
 
 /** Plugin configuration. Every credential defaults to an environment variable. */
 export interface Config {
@@ -44,7 +44,7 @@ export interface Config {
 
 /** Validated, defaulted configuration schema. */
 export const Config: z<Config> = z.object({
-  baseURL: z.string().default(process.env.VISION_BASE_URL ?? ''),
+  baseURL: z.string().default(''),
   apiKey: z.string().default(''),
   apiKeyEnv: z.string().default('VISION_API_KEY'),
   model: z.string().default(''),
@@ -64,12 +64,12 @@ export const Config: z<Config> = z.object({
  * @returns resolved configuration, or throws if a required endpoint field is absent.
  */
 export function resolveConfig(config: Config): ResolvedVisionBridgeConfig {
-  const baseURL = config.baseURL?.trim()
+  const baseURL = normalizeBaseURL(config.baseURL)
   const apiKey = (config.apiKey && config.apiKey.trim()) || (config.apiKeyEnv ? process.env[config.apiKeyEnv] ?? '' : '')
   const model = (config.model && config.model.trim()) || (config.modelEnv ? process.env[config.modelEnv] ?? '' : '')
-  if (!baseURL) throw new Error('vision-bridge: baseURL is required (set Config.baseURL or the VISION_BASE_URL environment variable).')
-  if (!apiKey) throw new Error(`vision-bridge: api key is required (set Config.apiKey or the ${config.apiKeyEnv} environment variable).`)
-  if (!model) throw new Error(`vision-bridge: model is required (set Config.model or the ${config.modelEnv} environment variable).`)
+  if (!baseURL) throw new Error('vision-bridge: baseURL is required (set Config.baseURL or the VISION_BASE_URL credential).')
+  if (!apiKey) throw new Error(`vision-bridge: api key is required (set Config.apiKey or the ${config.apiKeyEnv} credential).`)
+  if (!model) throw new Error(`vision-bridge: model is required (set Config.model or the ${config.modelEnv} credential).`)
   return {
     baseURL,
     apiKey,
@@ -81,16 +81,52 @@ export function resolveConfig(config: Config): ResolvedVisionBridgeConfig {
   }
 }
 
+interface CredentialSource {
+  resolve(ref: string): Promise<{ value: string } | undefined>
+}
+
+function normalizeBaseURL(value: string | undefined): string {
+  return (value ?? '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/chat\/completions$/, '')
+}
+
+async function resolveRuntimeConfig(ctx: Context, config: Config): Promise<ResolvedVisionBridgeConfig> {
+  const credentials = (ctx as unknown as { credentials: CredentialSource }).credentials
+  const read = async (ref: string, literal: string | undefined): Promise<string> => {
+    const direct = literal?.trim()
+    if (direct) return direct
+    return (await credentials.resolve(ref))?.value ?? ''
+  }
+  const [baseURL, apiKey, model] = await Promise.all([
+    read('VISION_BASE_URL', config.baseURL),
+    read(config.apiKeyEnv ?? 'VISION_API_KEY', config.apiKey),
+    read(config.modelEnv ?? 'VISION_MODEL', config.model),
+  ])
+  const normalizedBaseURL = normalizeBaseURL(baseURL)
+  if (!normalizedBaseURL) throw new Error('vision-bridge: baseURL is required (set Config.baseURL or the VISION_BASE_URL credential).')
+  if (!apiKey) throw new Error(`vision-bridge: api key is required (set Config.apiKey or the ${config.apiKeyEnv} credential).`)
+  if (!model) throw new Error(`vision-bridge: model is required (set Config.model or the ${config.modelEnv} credential).`)
+  return {
+    baseURL: normalizedBaseURL,
+    apiKey,
+    model,
+    timeoutMs: config.timeoutMs ?? 60_000,
+    describePrompt: config.describePrompt ?? 'Describe this image in detail.',
+    ocrPrompt: config.ocrPrompt ?? 'Transcribe all text in this image verbatim.',
+    maxBytes: config.maxBytes ?? 20 * 1024 * 1024,
+  }
+}
+
 /**
  * Register the vision-bridge service and the `vision_describe` tool.
- * @param ctx - the plugin context (requires `tools` and `fs`).
+ * @param ctx - the plugin context (requires `tools`, `fs`, and `credentials`).
  * @param config - validated, defaulted configuration.
  */
-export function apply(ctx: Context, config: Config): void {
-  const resolved = resolveConfig(config)
+export async function apply(ctx: Context, config: Config): Promise<void> {
+  const resolved = await resolveRuntimeConfig(ctx, config)
   const bridge: VisionBridge = new OpenAiCompatibleVisionBridge(resolved)
-  // Optional service: the host prompt admission reads it via ctx.get and keeps
-  // its existing text-only refusal when the bridge is not mounted.
   ctx.provide('visionBridge', bridge)
   applyVisionDescribeTool(ctx)
 }

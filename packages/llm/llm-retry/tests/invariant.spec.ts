@@ -54,6 +54,7 @@ const always = {
   mode: 'always' as const,
   policyKey: 'always-policy',
   retry: 1,
+  maxRetries: 2,
   delayMs: 1,
   failure,
 }
@@ -67,7 +68,7 @@ describe('llm-retry invariants', () => {
     }] as never, 1, 1)).toBeUndefined()
   })
 
-  it('accepts successive bounded and unbounded records inside their open steps', async () => {
+  it('accepts successive bounded records inside their open steps', async () => {
     const ctx = await setup()
     const session = openStep(ctx, 'retry-invariant-valid')
 
@@ -76,8 +77,8 @@ describe('llm-retry invariants', () => {
       session.append('llm/retry', {
         turn: 1, step: 1, ...normal, retry: 2, delayMs: 0,
       })
-      const unbounded = openStep(ctx, 'retry-invariant-always')
-      unbounded.append('llm/retry', { turn: 1, step: 1, ...always })
+      const boundedAlways = openStep(ctx, 'retry-invariant-always')
+      boundedAlways.append('llm/retry', { turn: 1, step: 1, ...always })
     }).not.toThrow()
     expect(() => { ctx.emit('tools/change') }).not.toThrow()
   })
@@ -139,7 +140,8 @@ describe('llm-retry invariants', () => {
     ['max-zero', { ...normal, maxRetries: 0 }, /positive safe maxRetries/],
     ['max-fraction', { ...normal, maxRetries: 1.5 }, /positive safe maxRetries/],
     ['over-budget', { ...normal, retry: 3 }, /must not exceed/],
-    ['always-maximum', { ...always, maxRetries: 2 }, /always mode must omit maxRetries/],
+    ['always-max-zero', { ...always, maxRetries: 0 }, /positive safe maxRetries/],
+    ['always-over-budget', { ...always, retry: 3 }, /must not exceed/],
     ['unknown-mode', { ...always, mode: 'sometimes' }, /mode must be normal or always/],
     ['empty-provider', { ...always, provider: '' }, /provider must be a non-empty string/],
     ['empty-policy-key', { ...always, policyKey: '' }, /policyKey must be a non-empty string/],

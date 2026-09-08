@@ -115,6 +115,19 @@ export interface StoredSuffix {
 }
 
 /**
+ * A stored session's header plus its newest events — the return shape of the
+ * optional tail-capable {@link PersistenceBackend.loadStoredTail} hook.
+ * `events` is the contiguous suffix of at most `maxEvents` stored events
+ * (newest last), and `hasMore` reports whether the stored log holds anything
+ * older. Non-mutating: no truncation, no closers.
+ */
+export interface StoredTail {
+  meta: SessionHeader
+  events: SessionEvent[]
+  hasMore: boolean
+}
+
+/**
  * The storage contract between {@link PersistenceCoordinator} and a concrete
  * backend: the minimal set of durable primitives the orchestration calls. A
  * backend implements these (over files, rows, an object store, …); the
@@ -174,6 +187,28 @@ export interface PersistenceBackend<TornMarker = unknown> {
    * @param signal - optional cancellation for backend read work.
    */
   loadStoredFrom?(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<StoredSuffix | undefined>
+
+  /**
+   * Optional tail-capable read behind the service's `readTail`: return the
+   * header plus the newest `maxEvents` stored events (contiguous suffix) and
+   * whether the log holds anything older, without decoding the whole log.
+   * A framed sequential medium (JSONL over concatenated Zstandard frames)
+   * implements this so a bounded tail window costs only the header frame and
+   * the tail frames; backends that cannot address events from the end omit it
+   * and the coordinator falls back to {@link loadStored} plus a tail slice.
+   * Non-mutating (no truncation, no closers, no preparation state). The
+   * returned graph must be fresh and unretained by the backend.
+   * `undefined` means only that no stored artifact exists for `id`.
+   * @param id - persisted session id to resolve.
+   * @param maxEvents - event budget for the window (non-negative safe
+   *   integer, validated by the coordinator before this hook runs).
+   * @param signal - optional cancellation for backend read work.
+   */
+  loadStoredTail?(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail | undefined>
 
   /**
    * Durably append a CONTIGUOUS batch, lazily materializing the session first
@@ -338,6 +373,18 @@ function needsLegacyPrefix(event: SessionEvent): boolean {
     default:
       return false
   }
+}
+
+/**
+ * Whether one dispatch event still lacks its turn/step location and therefore
+ * needs a prefix scan to place it (the readTail backfill starts at the window
+ * head, not at seq 0, so a truncated window cannot place such events).
+ */
+function needsPrefixLocation(event: SessionEvent): boolean {
+  // String-typed comparison for the same reason as backfillDispatchLocation.
+  const type: string = event.type
+  if (type !== 'tool/code-dispatch-start' && type !== 'tool/code-dispatch') return false
+  return !Number.isSafeInteger(asRecord(event.data)?.['turn'])
 }
 
 /** Upgrade the removed steering surface event into its current user-message equivalent. */
@@ -541,31 +588,104 @@ function eventMessageId(event: SessionEvent): PersistedMessageId | undefined {
   return typeof message?.['id'] === 'string' ? message['id'] as PersistedMessageId : undefined
 }
 
+/** Enclosing turn/step while scanning one stored event stream in seq order. */
+interface ScanLocation {
+  turn: number | undefined
+  step: number | undefined
+}
+
+/**
+ * Stamp turn/step onto Code Mode dispatch events written before the fields
+ * existed. Model-issued callIds are only step-unique (providers restart
+ * numbering per response), so clients pair dispatch events with their root
+ * `tool/call` context by turn:step:callId; without the backfill, an old log
+ * whose root callId repeats across steps fails to load with a duplicate-start
+ * error. Events outside any step stay untouched (there is nothing to pair).
+ */
+function backfillDispatchLocation(event: SessionEvent, location: ScanLocation): SessionEvent {
+  // String-typed on purpose: the dispatch event types live in a type-merged
+  // declaration this package does not depend on, so a literal comparison on
+  // the event-type union would be flagged as unreachable by the compiler.
+  const type: string = event.type
+  if (type !== 'tool/code-dispatch-start' && type !== 'tool/code-dispatch') return event
+  const data = asRecord(event.data)
+  if (data === undefined) return event
+  if (Number.isSafeInteger(data['turn']) && Number.isSafeInteger(data['step'])) return event
+  if (location.turn === undefined || location.step === undefined) return event
+  return {
+    ...event,
+    data: { ...data, turn: location.turn, step: location.step },
+  } as SessionEvent
+}
+
+/** Track the enclosing turn/step of a stored stream at its boundary events. */
+function advanceScanLocation(location: ScanLocation, event: SessionEvent): void {
+  const data = asRecord(event.data)
+  if (data === undefined) return
+  if (event.type === 'turn/start') {
+    if (Number.isSafeInteger(data['turn'])) {
+      location.turn = data['turn'] as number
+      location.step = undefined
+    }
+    return
+  }
+  if (event.type === 'step/start') {
+    if (Number.isSafeInteger(data['turn']) && Number.isSafeInteger(data['step'])) {
+      location.turn = data['turn'] as number
+      location.step = data['step'] as number
+    }
+    return
+  }
+  if (event.type === 'step/end') {
+    location.step = undefined
+    return
+  }
+  if (event.type === 'turn/end') {
+    location.turn = undefined
+    location.step = undefined
+  }
+}
+
 /** Materialize stored events as upgraded, validated snapshots with immutable messages. */
 function snapshotStoredEvents(events: readonly SessionEvent[], id: SessionId): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
+  const location: ScanLocation = { turn: undefined, step: undefined }
   return events.map((event) => {
     const migratedStart = migrateLegacyTurnStartEvent(event, id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
-    const snapshot = snapshotSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
+    const backfilled = backfillDispatchLocation(migratedSteering, location)
+    const snapshot = snapshotSessionEvent(migrateLegacyMessageEvent(backfilled, id, messageIds))
+    advanceScanLocation(location, snapshot)
     const messageId = eventMessageId(snapshot)
     if (messageId !== undefined) messageIds.set(snapshot.seq, messageId)
     return snapshot
   })
 }
 
+/** Cut the newest `maxEvents` events out of a whole stored log. */
+function tailSlice(meta: SessionHeader, events: SessionEvent[], maxEvents: number): StoredTail {
+  return {
+    meta,
+    events: maxEvents === 0 ? [] : events.slice(-maxEvents),
+    hasMore: events.length > maxEvents,
+  }
+}
+
 /** Upgrade and validate an exclusively owned backend result without copying it. */
 function adoptStoredEvents(events: SessionEvent[], id: SessionId): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
+  const location: ScanLocation = { turn: undefined, step: undefined }
   for (const [index, event] of events.entries()) {
     const migratedStart = migrateLegacyTurnStartEvent(event, id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
-    const adopted = adoptSessionEvent(migrateLegacyMessageEvent(migratedSteering, id, messageIds))
+    const backfilled = backfillDispatchLocation(migratedSteering, location)
+    const adopted = adoptSessionEvent(migrateLegacyMessageEvent(backfilled, id, messageIds))
     events[index] = adopted
+    advanceScanLocation(location, adopted)
     const messageId = eventMessageId(adopted)
     if (messageId !== undefined) messageIds.set(adopted.seq, messageId)
   }
@@ -867,6 +987,64 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     const whole = await this.readStoredPrefix(id, signal)
     // Sequential fallback: contiguous seqs from 0 make the suffix an index slice.
     return { meta: whole.meta, events: whole.events.slice(fromSeq) }
+  }
+
+  /**
+   * Read a session's newest `maxEvents` stored events, detached and
+   * non-mutating (the bounded tail window behind the service's `readTail`).
+   * Runs on the same per-id chain as writes; a backend with the tail-capable
+   * {@link PersistenceBackend.loadStoredTail} hook decodes only the tail,
+   * every other backend reads its stored prefix and slices the tail here.
+   * @param id - persisted session to read.
+   * @param maxEvents - event budget for the window; a non-negative integer.
+   * @param signal - optional cancellation for queued and backend read work.
+   * @returns stored header, the contiguous newest events (at most `maxEvents`),
+   * and whether the stored log holds anything older.
+   */
+  readTail(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 0) {
+      return Promise.reject(new TypeError(`readTail maxEvents must be a non-negative safe integer, got ${String(maxEvents)}`))
+    }
+    const retired = Promise.resolve(this.retirements.get(id))
+    const waited = signal === undefined ? retired : observeQueuedAbort(retired, signal, () => false)
+    return waited.then(() => this.serialize(id, () => this.readTailCore(id, maxEvents, signal), signal))
+  }
+
+  private async readTailCore(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    signal?.throwIfAborted()
+    if (this.backend.loadStoredTail !== undefined) {
+      let tail: StoredTail | undefined
+      try {
+        tail = await this.backend.loadStoredTail(id, maxEvents, signal)
+      } catch (error: unknown) {
+        if (signal?.aborted) signal.throwIfAborted()
+        throw error
+      }
+      signal?.throwIfAborted()
+      if (tail === undefined) throw new Error(`session "${id}" not found`)
+      this.assertStoredId(id, tail.meta)
+      this.assertVersion(tail.meta)
+      // A truncated window starts mid-log: legacy shapes and unplaced dispatch
+      // events need facts from the preceding prefix, so fall back to one whole
+      // stored-prefix read and slice the same tail out of it.
+      if (tail.events.some(needsLegacyPrefix) || (tail.hasMore && tail.events.some(needsPrefixLocation))) {
+        const whole = await this.readStoredPrefix(id, signal)
+        return tailSlice(whole.meta, whole.events, maxEvents)
+      }
+      const events = snapshotStoredEvents(tail.events, id)
+      this.assertEventsSupported(tail.meta, events)
+      return { meta: structuredClone(tail.meta), events, hasMore: tail.hasMore }
+    }
+    const whole = await this.readStoredPrefix(id, signal)
+    return tailSlice(whole.meta, whole.events, maxEvents)
   }
 
   /** Read one detached physical prefix without logical recovery or caching. */

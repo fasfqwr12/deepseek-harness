@@ -98,6 +98,35 @@ function validatePwshArgs(args: PwshToolArgs): void {
   // the shared rule both enforcing families validate identically.
   validateEscalationArgs(args.sandbox_permissions, args.justification)
 }
+
+/**
+ * Fixed read-only command strings the scheduler may overlap. Exact-match
+ * only: no prefixes, no patterns — any other shell syntax stays an
+ * exclusive barrier, and the model can never self-declare concurrency.
+ */
+const READ_ONLY_PWSH_COMMANDS: ReadonlySet<string> = new Set([
+  'Get-Location',
+  'Get-ChildItem',
+  'git status',
+  'git status --short',
+  'git branch',
+  'git log --oneline -20',
+  'git diff --stat',
+])
+
+/**
+ * The scheduler trusts only this host-owned allowlist. The model cannot mark an
+ * arbitrary command as concurrent, and any shell syntax beyond these fixed
+ * read-only commands remains an exclusive barrier.
+ */
+function isFixedReadOnlyPwshCommand(args: unknown): boolean {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return false
+  const value = args as Partial<PwshToolArgs>
+  return typeof value.command === 'string' && READ_ONLY_PWSH_COMMANDS.has(value.command)
+    && value.run_in_background !== true
+    && value.sandbox_permissions === undefined
+    && value.justification === undefined
+}
 /* jscpd:ignore-end */
 
 function pwshDescription(backgroundEnabled: boolean, escalationModes: readonly SandboxMode[]): string {
@@ -245,13 +274,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.systemPrompt.section({
     name: 'tool:pwsh',
     order: 105,
-    text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. '
+    text: 'Issue independent read/search/fetch calls together in one response. Shell calls overlap only when the host classifies their exact command as safe; never claim a command is parallel-safe yourself. The host already classifies these fixed read-only probes as safe and overlaps them: `Get-Location`, `Get-ChildItem`, `git status`, `git status --short`, `git branch`, `git log --oneline -20`, `git diff --stat` — issue them together in one response when independent. Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. '
       + 'On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure.',
   })
 
   ctx.tools.register(defineTool({
     name: 'pwsh',
     description: pwshDescription(backgroundEnabled, escalationModes),
+    isConcurrencySafe: isFixedReadOnlyPwshCommand,
     /* jscpd:ignore-start -- deliberate mirror of dsh-tool-bash's parameter surface (pwsh-tool-and-executor Agent Note). */
     parameters: {
       command: { type: 'string', required: true, description: 'The PowerShell command to execute.' },

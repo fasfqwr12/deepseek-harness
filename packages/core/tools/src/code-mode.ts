@@ -471,6 +471,11 @@ export function createRunCodeTool(registry: ToolRuntime, options: RunCodeBridgeO
         const input = {
           callId: subCallId,
           rootCallId: exec.rootCallId,
+          // 与 rootCallId 同源传播：根调用的 turn/step 对整棵派发树恒定，
+          // 嵌套 run_code 的子派发日志同样需要它做命名空间。
+          ...exec.turn !== undefined && exec.step !== undefined
+            ? { turn: exec.turn, step: exec.step }
+            : {},
           name,
           arguments: normalized.dispatched,
           ...exec.agent ? { agent: exec.agent } : {},
@@ -518,6 +523,11 @@ export function createRunCodeTool(registry: ToolRuntime, options: RunCodeBridgeO
                 arguments: normalized.logged,
                 isError: result.isError,
                 content: logged,
+                // 命名空间：模型 callId 只在 step 内唯一，客户端按 turn:step:callId
+                // 把 dispatch 子事件配对回其根 tool/call 上下文。
+                ...exec.turn !== undefined && exec.step !== undefined
+                  ? { turn: exec.turn, step: exec.step }
+                  : {},
               })
             })().finally(() => { logWork.delete(task) })
             logWork.add(task)
@@ -538,6 +548,10 @@ export function createRunCodeTool(registry: ToolRuntime, options: RunCodeBridgeO
                 subCallId,
                 name,
                 arguments: normalized.logged,
+                // 命名空间：与 'tool/code-dispatch' 落点一致，见上方注释。
+                ...exec.turn !== undefined && exec.step !== undefined
+                  ? { turn: exec.turn, step: exec.step }
+                  : {},
               })
               // Ordered prepare runs INSIDE the driver lane: the next entry's
               // pre-execute waits for this resolution, as under the native

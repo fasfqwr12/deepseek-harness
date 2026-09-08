@@ -16,6 +16,7 @@
  * redundancy. */
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   LiveSlotNode, LocaleFace, OwnerOf, SlotEntryDef, SlotMap, SlotRenderer, SlotRendererHost,
@@ -412,6 +413,9 @@ export class SlotRegistry extends Service {
       sessions: {
         list: sessions.list,
         provideInfo: sessions.currentProvideInfo,
+        // Keep-alive face: per-session bundle resolution so the renderer can
+        // keep recent NON-current sessions mounted (see SessionMaybeEntry).
+        infoOf: (id: string) => sessions.provideInfoOf(id as SessionId),
       },
       workspaces: { list: workspaces.list },
       get locale() { return service._locale },

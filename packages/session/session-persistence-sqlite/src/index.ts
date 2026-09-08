@@ -18,7 +18,7 @@ import {
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator,
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
   type SessionInspection, type SessionPersistenceRevision as PersistenceRevision,
-  type StoredPrefix, type StoredSuffix,
+  type StoredPrefix, type StoredSuffix, type StoredTail,
 } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent, SurfaceEventType, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
@@ -196,6 +196,16 @@ export class SqliteSessionPersistence extends SessionPersistence implements Pers
 
   readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
     return this.coordinator.readFrom(id, fromSeq, signal)
+  }
+
+  // SQLite registers no loadStoredTail hook: the coordinator reads the stored
+  // prefix and slices the tail, which stays cheap for the row-addressable medium.
+  override readTail(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<StoredTail> {
+    return this.coordinator.readTail(id, maxEvents, signal)
   }
 
   // One method serves both public `list` and the backend hook; delegating it to

@@ -63,7 +63,7 @@ export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void
   ctx.systemPrompt.section({
     name: 'tool:write',
     order: 101,
-    text: 'Use the write tool to create files or completely replace file contents. Existing files are overwritten, so read an existing file first (the default fs-observation-policy requires it) and prefer edit for targeted changes.',
+    text: 'Use the write tool to create files or completely replace file contents. read is optional: an unread file can be created or overwritten directly; if it was read, the write is version-guarded. Prefer edit for targeted changes.',
   })
 
   ctx.tools.register(defineTool({
@@ -120,6 +120,13 @@ export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void
       }
       // Record the present observation (a no-op when no policy plugin listens).
       ctx.emit('fs/observed', target, { kind: 'present', version: outcome.version }, exec)
+      // Detect transport-level corruption early: if the bytes we just wrote do
+      // not decode back to the exact requested string, fail loudly instead of
+      // silently persisting a damaged file.
+      const written = await ctx.fs.readText(target, exec.signal)
+      if (written !== input.content) {
+        throw new Error(`write verification failed for "${target.displayPath}": written content does not match the requested string (requested ${Buffer.byteLength(input.content, 'utf8')} UTF-8 bytes, found ${Buffer.byteLength(written, 'utf8')}). Retry with pwsh [System.IO.File]::WriteAllText.`)
+      }
       return {
         path: target.displayPath,
         operation: outcome.operation,

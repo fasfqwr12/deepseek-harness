@@ -144,6 +144,20 @@ describe('dsh-tool-subagent', () => {
     })).toEqual({ kind: 'parallel' })
   })
 
+  it('classifies fork-context provider calls exclusive (concurrent history replays stampede memory)', async () => {
+    // A fork-context child replays the parent's whole completed-turn history
+    // inside the tool call; concurrent starts multiply that cost (observed
+    // incident: three forks of a ~74k-event parent exhausted host memory).
+    // The scheduler must serialize such starts against all other calls.
+    const ctx = await setup({ provider: 'mock' }, { inheritsParentContext: true })
+    expect(ctx.tools.executionMode({
+      signal: testToolSignal,
+      callId: CallId('subagent-fork-start'),
+      name: 'subagent',
+      arguments: { description: 'do work', prompt: 'Reply OK', run_in_background: true },
+    })).toEqual({ kind: 'exclusive' })
+  })
+
   it('overlaps sibling foreground delegations dispatched concurrently', async () => {
     // Two children each block until both have started: hidden serialization
     // in the tool body, registry pipeline, or provider start path would

@@ -241,6 +241,12 @@ export interface LlmModelInfo {
   description?: string
   /** Accepted request modalities; absent means unknown, while an explicit omission is negative capability. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Whether this model supports native upstream web search (server-side tool-call or
+   * equivalent). `true` = upstream handles search; `false` or absent = DSH web_search
+   * tool should be used. Used by the auto-routing decision when `searchMode` is `auto`.
+   */
+  nativeSearch?: boolean
 }
 
 /** Provider-owned context capacity for one exact provider/model route. */

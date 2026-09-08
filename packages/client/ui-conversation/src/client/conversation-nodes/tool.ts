@@ -237,14 +237,24 @@ export const toolDefinition: ConversationNodeDefinition<ToolState> = {
   kind: 'tool-call',
   target: 'chat',
   match: (event) => {
-    if (event.type === 'tool/call') return { id: String(event.data.callId), role: 'start' }
+    // 模型 callId 只在 step 内唯一（provider 每次响应重新编号），同一 turn
+    // 的不同 step 会复用同一 callId；按 turn:step:callId 命名空间路由，
+    // 否则重复的 start 会触发 "received more than one start Match"。
+    if (event.type === 'tool/call') {
+      return { id: `${event.data.turn}:${event.data.step}:${String(event.data.callId)}`, role: 'start' }
+    }
     if (event.type === 'tool/result' && isAppendSurfaceEvent(event)) {
-      return { id: String(event.data.message.source.callId), role: 'update' }
+      const source = event.data.message.source
+      return { id: `${event.data.turn}:${event.data.step}:${String(source.callId)}`, role: 'update' }
     }
     if (event.type === 'tool/code-dispatch-start' || event.type === 'tool/code-dispatch') {
       const rootCallId: unknown = event.data.rootCallId
+      // 旧日志由持久层按所在 step 回填 turn/step；仍缺失（step 外的孤立
+      // 事件）时落到 0:0 命名空间——真实 turn 从 1 起，不会与真实上下文冲突。
+      const turn = Number.isSafeInteger(event.data.turn) ? event.data.turn as number : 0
+      const step = Number.isSafeInteger(event.data.step) ? event.data.step as number : 0
       return typeof rootCallId === 'string' && rootCallId !== ''
-        ? { id: rootCallId, role: 'update' }
+        ? { id: `${turn}:${step}:${rootCallId}`, role: 'update' }
         : null
     }
     return null

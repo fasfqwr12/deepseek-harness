@@ -55,6 +55,7 @@ export type {
   PersistenceCoordinatorOptions,
   StoredPrefix,
   StoredSuffix,
+  StoredTail,
 } from './coordinator.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -219,6 +220,40 @@ export abstract class SessionPersistence extends Service {
    */
   abstract readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal):
   Promise<{ meta: SessionHeader; events: SessionEvent[] }>
+
+  /**
+   * Read a session's newest `maxEvents` stored events — the bounded tail
+   * window for read models that only need the recent conversation (e.g. a
+   * detached history page). Detached and non-mutating like {@link readFrom}:
+   * no preparation cache, torn-tail truncation, or synthetic closers; only
+   * events from the valid contiguous stored prefix are returned, so a torn
+   * fragment never reaches the caller. Backends whose medium can address
+   * events from the end (JSONL over Zstandard frames via the coordinator)
+   * decode only the tail; every other backend reads its stored prefix and
+   * slices the tail. The default implementation inspects the whole session
+   * and slices it; coordinator-backed backends override with the
+   * tail-capable backend hook.
+   * @param id - the persisted session to read.
+   * @param maxEvents - event budget for the window; a non-negative safe integer.
+   * @param signal - optional cancellation for queued and backend read work.
+   * @returns the header, the contiguous newest events (at most `maxEvents`,
+   * newest last), and whether the stored log holds anything older.
+   */
+  async readTail(
+    id: SessionId,
+    maxEvents: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }> {
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 0) {
+      throw new TypeError(`readTail maxEvents must be a non-negative safe integer, got ${String(maxEvents)}`)
+    }
+    const inspected = await this.inspect(id, signal)
+    return {
+      meta: inspected.meta,
+      events: maxEvents === 0 ? [] : inspected.events.slice(-maxEvents),
+      hasMore: inspected.events.length > maxEvents,
+    }
+  }
 
   /**
    * Lightweight listing from metadata, without a full-log parse.

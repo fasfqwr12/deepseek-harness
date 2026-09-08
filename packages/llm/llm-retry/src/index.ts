@@ -63,16 +63,13 @@ function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => nu
 }
 
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
-  return policy.mode === 'always'
-    ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio])
-    : JSON.stringify([
-      policy.mode,
-      policy.maxRetries,
-      [...policy.retryableCodes].sort(),
-      policy.initialDelayMs,
-      policy.maxDelayMs,
-      policy.jitterRatio,
-    ])
+  return JSON.stringify([
+    policy.mode,
+    policy.maxRetries,
+    policy.initialDelayMs,
+    policy.maxDelayMs,
+    policy.jitterRatio,
+  ])
 }
 
 function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean> {
@@ -91,7 +88,7 @@ function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean
 }
 
 /**
- * Install provider-routed normal or unbounded request recovery.
+ * Install provider-routed bounded all-error request recovery.
  * @param ctx - plugin context that owns the listener and active waits.
  * @param config - empty executor config; provider registrations own policy.
  * @param internals - non-serializable deterministic hooks for tests.
@@ -123,30 +120,18 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
   ): Promise<RequestErrorAction> {
     const fusedSignal = AbortSignal.any([signal, lifetime.signal])
     if (fusedSignal.aborted) return
-    const eventData: LlmRetryEventData = policy.mode === 'normal'
-      ? {
-        retryId,
-        turn,
-        step,
-        provider,
-        mode: policy.mode,
-        policyKey,
-        retry,
-        maxRetries: policy.maxRetries,
-        delayMs,
-        failure,
-      }
-      : {
-        retryId,
-        turn,
-        step,
-        provider,
-        mode: policy.mode,
-        policyKey,
-        retry,
-        delayMs,
-        failure,
-      }
+    const eventData: LlmRetryEventData = {
+      retryId,
+      turn,
+      step,
+      provider,
+      mode: policy.mode,
+      policyKey,
+      retry,
+      maxRetries: policy.maxRetries,
+      delayMs,
+      failure,
+    }
     agent.session.append('llm/retry', eventData)
     if (!await cancellableDelay(delayMs, fusedSignal)) return
     agent.session.append('llm/retry-started', { retryId, turn, step, retry })
@@ -162,18 +147,22 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     // 所以这里读到的正是该请求生效的覆盖设置（随 request/header 持久化，重启后仍在）。
     const override = agent.session.requestHeader()?.config.retryOverride
     if (override === 'off') return next()
-    const effective: ResolvedRetryPolicy = override === undefined
-      ? policy
-      : policy.mode === 'normal'
-        ? Object.freeze({
-          ...policy,
-          ...override.maxRetries === undefined ? {} : { maxRetries: override.maxRetries },
-          ...override.initialDelayMs === undefined ? {} : { initialDelayMs: override.initialDelayMs },
-        })
-        : Object.freeze({
-          ...policy,
-          ...override.initialDelayMs === undefined ? {} : { initialDelayMs: override.initialDelayMs },
-        })
+    const effective: ResolvedRetryPolicy = Object.freeze({
+      ...policy,
+      ...override?.maxRetries === undefined ? {} : { maxRetries: override.maxRetries },
+      ...override?.initialDelayMs === undefined ? {} : { initialDelayMs: override.initialDelayMs },
+    })
+    const policyKey = retryPolicyKey(effective)
+    const priorPolicyRetry = agent.session.events.findLast((event): event is SessionEvent<'llm/retry'> =>
+      event.type === 'llm/retry'
+      && event.data.turn === turn
+      && event.data.step === step
+      && event.data.provider === provider
+      && event.data.policyKey === policyKey,
+    )
+    const previousRetry = priorPolicyRetry?.data.retry ?? 0
+    if (previousRetry >= effective.maxRetries) return next()
+
     if (effective.mode === 'always') {
       if (signal.aborted || lifetime.signal.aborted) return
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
@@ -190,32 +179,16 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
         return downstream.decision
       }
-    } else if (!effective.retryableCodes.includes(failure.code)) {
-      return next()
     }
 
-    const policyKey = retryPolicyKey(effective)
-    const priorPolicyRetry = agent.session.events.findLast((event): event is SessionEvent<'llm/retry'> =>
-      event.type === 'llm/retry'
-      && event.data.turn === turn
-      && event.data.step === step
-      && event.data.provider === provider
-      && event.data.policyKey === policyKey,
-    )
-    const previousRetry = priorPolicyRetry?.data.retry ?? 0
-    if (effective.mode === 'normal' && previousRetry >= effective.maxRetries) return next()
     const retry = previousRetry + 1
     const retryId = priorPolicyRetry?.data.retryId ?? RetryId(randomUUID())
     let delayMs: number
     if (failure.providerRetryAfterMs !== undefined
       && Number.isFinite(failure.providerRetryAfterMs)
-      && failure.providerRetryAfterMs > 0) {
-      if (failure.providerRetryAfterMs > effective.maxDelayMs) {
-        if (effective.mode === 'normal') return next()
-        delayMs = localDelay(effective, retry, random)
-      } else {
-        delayMs = failure.providerRetryAfterMs
-      }
+      && failure.providerRetryAfterMs > 0
+      && failure.providerRetryAfterMs <= effective.maxDelayMs) {
+      delayMs = failure.providerRetryAfterMs
     } else {
       delayMs = localDelay(effective, retry, random)
     }

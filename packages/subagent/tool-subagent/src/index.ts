@@ -364,8 +364,15 @@ export function apply(ctx: Context, config: Config): void {
         }],
       },
       // Children never mutate the parent session; the one parent-owned write
-      // (tasks.start) is a synchronous commutative insertion.
-      isConcurrencySafe: () => true,
+      // (tasks.start) is a synchronous commutative insertion. A fork-context
+      // provider additionally replays the parent's whole completed-turn
+      // history into the child session INSIDE this call, so concurrent calls
+      // stampede CPU and memory (observed: three forks of a ~74k-event parent
+      // exhausted 15.8GB and interrupted the whole step). Such providers
+      // schedule exclusively — the scheduler serializes each start against
+      // all other tool calls. Fresh-context providers (spawn/acp/…) keep the
+      // parallel-safe classification.
+      isConcurrencySafe: () => !provider.inheritsParentContext,
       async execute(args, exec) {
         const parent = exec.agent
         if (!parent) {

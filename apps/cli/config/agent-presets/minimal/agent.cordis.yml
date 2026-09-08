@@ -43,20 +43,7 @@
           * Please avoid commands that may produce a very large amount of output.
           * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
 
-# The bare local filesystem shadows the host's sandboxed provider only for this
-# preset. The editor shares that realm and requires absolute paths.
-- id: filesystem
-  name: cordis:group
-  group: true
-  isolate:
-    fs: true
+- id: str-replace-editor
+  name: '@deepseek-ai/dsh-tool-str-replace-editor'
   config:
-    - id: fs-local
-      name: '@deepseek-ai/dsh-fs-local'
-      config:
-        cwd: !!js process.env.DSH_CWD ?? process.cwd()
-
-    - id: str-replace-editor
-      name: '@deepseek-ai/dsh-tool-str-replace-editor'
-      config:
-        maxOutputChars: 16000
+    maxOutputChars: 16000

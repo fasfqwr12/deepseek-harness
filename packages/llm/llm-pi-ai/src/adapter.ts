@@ -282,6 +282,7 @@ export class PiAiAdapter extends LlmAdapter {
         id: model.id,
         name: model.name,
         inputModalities: [...model.input],
+        nativeSearch: false, // pi-ai adapter doesn't expose native search yet
       }))
     })
   }
@@ -307,6 +308,7 @@ export class PiAiAdapter extends LlmAdapter {
         context: { contextWindow: resolvedModel.contextWindow },
         ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
         ...reasoningInfo(resolvedModel, defaultLevel),
+        nativeSearch: false, // pi-ai adapter doesn't expose native search yet
       }
     })
   }

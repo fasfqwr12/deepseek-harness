@@ -375,6 +375,38 @@ describe('bash tool', () => {
     expect(bashSchema.description).toContain('job_output')
   })
 
+  it('classifies only the host-owned exact pwd command as parallel', async () => {
+    const ctx = await setup()
+    const executionMode = (args: unknown) => ctx.tools.executionMode({
+      signal: testToolSignal,
+      callId: CallId('bash-execution-mode'),
+      name: 'bash',
+      arguments: args,
+    })
+
+    expect(executionMode({ command: 'pwd', description: 'Print current directory' }))
+      .toEqual({ kind: 'parallel' })
+
+    for (const args of [
+      { command: ' pwd', description: 'Leading space changes the command' },
+      { command: 'pwd ', description: 'Trailing space changes the command' },
+      { command: 'pwd; rm -rf .', description: 'Write after read' },
+      { command: '$(pwd)', description: 'Command substitution' },
+      { command: 'pwd | cat', description: 'Pipeline' },
+      { command: 'pwd > /tmp/dsh-output', description: 'Redirection' },
+      { command: 'pwd && true', description: 'Command chaining' },
+      { command: 'pwd', description: 'Background process', run_in_background: true },
+      { command: 'pwd', description: 'Sandbox escalation', sandbox_permissions: 'workspace-write', justification: 'test' },
+    ]) {
+      expect(executionMode(args)).toEqual({ kind: 'exclusive' })
+    }
+
+    const schema = ctx.tools.schemas().find(item => item.name === 'bash')!
+    const properties = schema.parameters.properties as Record<string, unknown>
+    expect(properties).not.toHaveProperty('concurrency_safe')
+    expect(schema as unknown as Record<string, unknown>).not.toHaveProperty('isConcurrencySafe')
+  })
+
   it('contributes the exit-code habit as its prompt section (guidance the descriptions cannot carry)', async () => {
     const ctx = await setup()
     ctx.systemPrompt.section({ name: 'test:before-bash', order: 104, text: 'before' })
@@ -389,6 +421,7 @@ describe('bash tool', () => {
       'test:after-bash',
     ])
     expect(section?.text).toContain('[exit code: N]')
+    expect(section?.text).toContain('Issue independent read/search/fetch calls together in one response.')
   })
 
   it('unregisters everything when the plugin fiber is disposed (HMR safety)', async () => {
@@ -605,12 +638,15 @@ describe('sandbox escalation through the generic task producer', () => {
     const plain = await setup()
     expect(text(await call(plain, 'bash', escalate))).toContain('not available in this composition')
 
-    const { ctx } = await setupSandboxed(true)
+    const { ctx, bash } = await setupSandboxed(true)
     const prompted = vi.fn()
     ctx.on('approval/request', () => { prompted(); return Promise.resolve<ApprovalOutcome>('allowed-once') })
-    const result = await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
-    expect(text(result)).toContain('not strictly wider')
+    // A same-level request grants nothing new: the command runs under the
+    // standing mode without an approval prompt.
+    const sameLevel = await call(ctx, 'bash', { ...escalate, sandbox_permissions: 'workspace-write' }, sandboxAgent('workspace-write'))
+    expect(sameLevel.isError).toBe(false)
     expect(prompted).not.toHaveBeenCalled()
+    expect(bash.modes).toEqual(['workspace-write'])
 
     const malformed = sandboxAgent()
     ;(malformed.session.events as unknown as Array<{ type: string; data: { mode: string } }>).push({

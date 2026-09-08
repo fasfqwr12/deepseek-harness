@@ -290,7 +290,7 @@ describe('compact configuration and defaults', () => {
 
     expect(resolved).toEqual({
       thresholdRatio: 0.8,
-      retainRatio: 0.16,
+      retainRatio: 0.25,
       summarizationProvider: '',
       summarizationModel: '',
       maxTokens: 8192,
@@ -308,7 +308,7 @@ describe('compact configuration and defaults', () => {
     })
     expect(thresholdOnly).toMatchObject({
       thresholdRatio: 0.5,
-      retainRatio: 0.16,
+      retainRatio: 0.25,
     })
 
     const retentionOnly = resolveConfig({
@@ -425,7 +425,7 @@ describe('compact configuration and defaults', () => {
       [{ thresholdRatio: 0 }, /number in \(0, 1\]/],
       [{ thresholdRatio: 1.1 }, /number in \(0, 1\]/],
       [{ retainRatio: 0.9 }, /retainRatio \(0.9\) must be less than the resolved thresholdRatio \(0.8\)/],
-      [{ thresholdRatio: 0.1 }, /retainRatio \(0.16\) must be less than the resolved thresholdRatio \(0.1\)/],
+      [{ thresholdRatio: 0.1 }, /retainRatio \(0.25\) must be less than the resolved thresholdRatio \(0.1\)/],
       [{ retainTokens: -1 }, /non-negative integer/],
       [{ retainRatio: 0.2, retainTokens: 100 }, /mutually exclusive/],
       [{ modelPolicies: {} }, /modelPolicies must be an array/],
@@ -450,7 +450,7 @@ describe('compact configuration and defaults', () => {
       [{ modelPolicies: [{ provider: MODEL, model: MODEL, retainRatio: 0.2, retainTokens: 100 }] }, /mutually exclusive/],
       [
         { modelPolicies: [{ provider: MODEL, model: MODEL, thresholdRatio: 0.1 }] },
-        /modelPolicies\[0\]: retainRatio \(0.16\).*thresholdRatio \(0.1\)/,
+        /modelPolicies\[0\]: retainRatio \(0.25\).*thresholdRatio \(0.1\)/,
       ],
       [
         { modelPolicies: [{ provider: MODEL, model: MODEL, retainRatio: 0.9 }] },

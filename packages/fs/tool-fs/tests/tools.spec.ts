@@ -890,6 +890,22 @@ describe('sandbox escalation API (write/edit)', () => {
     expect(fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
   })
 
+  it('a same-level escalation request runs under the standing mode without prompting', async () => {
+    const { ctx, fs } = await setupConfining({ approval: true })
+    const prompted = vi.fn()
+    ctx.on('approval/request', () => { prompted(); return Promise.resolve('allowed-once' as const) })
+    const agent = escalationAgent([{ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }])
+    const result = await call(ctx, 'write', {
+      file_path: 'a.txt',
+      content: 'x',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'redundant same-level request',
+    }, agent)
+    expect(result.isError).toBe(false)
+    expect(prompted).not.toHaveBeenCalled()
+    expect(fs.stamped).toEqual([{ mode: 'danger-full-access', workspaceRoot: resolve('/session-project') }])
+  })
+
   it('a rejected escalation fails closed with its own text and never mutates', async () => {
     const { ctx, fs } = await setupConfining({ approval: true })
     ctx.on('approval/request', () => Promise.resolve('rejected' as const))

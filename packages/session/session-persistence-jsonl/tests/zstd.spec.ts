@@ -450,6 +450,41 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     expect((await ctx.sessionPersistence.load(header.id)).events).toEqual([...oneTurnLog(), ...secondTurn])
   })
 
+  it('readTail returns the newest bounded window with only header and tail frames decoded', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('tail-window')
+    await ctx.sessionPersistence.create(header)
+    const first = oneTurnLog()
+    await ctx.sessionPersistence.append(header.id, first)
+    const second = [
+      { type: 'turn/start', seq: 6, time: 7, data: { turn: 2 } },
+      { type: 'turn/end', seq: 7, time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
+    ] as SessionEvent[]
+    await ctx.sessionPersistence.append(header.id, second)
+    expect(scanZstdFrames(await readFile(logPath(root, header.cwd, header.id, 'zstd'))).frames)
+      .toHaveLength(3)
+
+    // Whole budget: the entire log fits, nothing older remains.
+    const whole = await ctx.sessionPersistence.readTail(header.id, first.length + second.length)
+    expect(whole.meta.id).toBe(header.id)
+    expect(whole.events).toEqual([...first, ...second])
+    expect(whole.hasMore).toBe(false)
+
+    // Bounded budget: only the newest batch, older events stay behind.
+    const bounded = await ctx.sessionPersistence.readTail(header.id, second.length)
+    expect(bounded.events).toEqual(second)
+    expect(bounded.hasMore).toBe(true)
+
+    // Zero budget: header only, event frames exist but stay undecoded.
+    const empty = await ctx.sessionPersistence.readTail(header.id, 0)
+    expect(empty.meta.id).toBe(header.id)
+    expect(empty.events).toEqual([])
+    expect(empty.hasMore).toBe(true)
+
+    await expect(ctx.sessionPersistence.readTail(header.id, -1)).rejects.toThrow(TypeError)
+  })
+
   it('lists from a multi-chunk header frame without decoding a corrupt event frame', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)

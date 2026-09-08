@@ -18,7 +18,7 @@
 
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, win32 } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { releaseFamily } from './families.ts'
@@ -66,6 +66,36 @@ function packedDependencies(directories: readonly string[]): Map<string, { url: 
   return dependencies
 }
 
+/**
+ * npm arguments for an external packed-artifact consumer.
+ *
+ * Optional dependencies remain enabled because npm uses their `os` and `cpu`
+ * fields to select compatible platform payloads. Windows consumers need this
+ * selection for prebuilt Koffi and ripgrep binaries, while npm skips the
+ * Linux-only Landlock packages on incompatible hosts.
+ * @returns The complete install argument list.
+ */
+export function packedInstallArguments(): string[] {
+  return ['install', '--no-audit', '--no-fund', '--package-lock=false']
+}
+
+/**
+ * Resolve npm without asking Windows to execute a command shim.
+ * @param args - npm arguments.
+ * @param platform - host platform.
+ * @param nodeExecutable - Node executable that owns the bundled npm CLI.
+ * @returns The executable and complete argument list.
+ */
+export function npmInvocation(
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  nodeExecutable: string = process.execPath,
+): readonly [command: string, args: readonly string[]] {
+  if (platform !== 'win32') return ['npm', [...args]]
+  const npmCli = win32.join(win32.dirname(nodeExecutable), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+  return [nodeExecutable, [npmCli, ...args]]
+}
+
 /** Install every tarball under `--from` and drive the `--family` entry. */
 function main(): void {
   const { values } = parseArgs({
@@ -99,13 +129,8 @@ function main(): void {
 
     const environment = consumerEnvironment(consumerRoot)
     console.log(`release verify-packed-install: installing ${String(packed.size)} tarball(s) into ${consumerRoot}`)
-    // Optional dependencies are omitted: the Landlock platform packages behind
-    // them need a musl toolchain and one build per architecture, and a consumer
-    // that cannot install them must still start — which is what optional means
-    // here. Their entry package is a plain dependency of dsh-sandbox-local, so
-    // its tarball is supplied through --from.
-    capture('npm', ['install', '--no-audit', '--no-fund', '--package-lock=false', '--omit=optional'],
-      { cwd: consumerRoot, env: environment })
+    const [npmCommand, npmArgs] = npmInvocation(packedInstallArguments())
+    capture(npmCommand, npmArgs, { cwd: consumerRoot, env: environment })
 
     const bin = join(consumerRoot, 'node_modules', ...entry.packageName.split('/'), entry.binPath)
     const version = capture(process.execPath, [bin, '--version'], { cwd: consumerRoot, env: environment })

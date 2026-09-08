@@ -33,22 +33,24 @@ export interface BackoffConfig {
   jitterRatio?: number
 }
 
-/** Current bounded transient retry behavior for one provider route. */
+/** Bounded retry behavior for every model-request failure on one provider route. */
 export interface NormalRetryPolicyConfig {
-  /** Retry only configured transient failure codes. */
+  /** Retry every model-request failure; retryableCodes is retained for compatibility and ignored. */
   mode: 'normal'
-  /** Maximum eligible retries after the first request (default 2). */
+  /** Maximum retries after the first request (default 2). */
   maxRetries?: number
-  /** Stable failure codes eligible for this policy. */
+  /** @deprecated Accepted for configuration compatibility; all error codes are retried. */
   retryableCodes?: string[]
   /** Local exponential-backoff and jitter configuration. */
   backoff?: BackoffConfig
 }
 
-/** Unbounded retry behavior for every model-request failure on one provider route. */
+/** Bounded retry behavior for every model-request failure on one provider route. */
 export interface AlwaysRetryPolicyConfig {
-  /** Retry every model-request failure until success, cancellation, or disposal. */
+  /** Retry every model-request failure until success or the configured maximum. */
   mode: 'always'
+  /** Maximum retries after the first request (default 2). */
+  maxRetries?: number
   /** Local exponential-backoff and jitter configuration. */
   backoff?: BackoffConfig
 }
@@ -63,16 +65,18 @@ export interface ResolvedRetryBackoff {
   readonly jitterRatio: number
 }
 
-/** Fully resolved bounded transient retry policy. */
+/** Fully resolved bounded all-error retry policy. */
 export interface ResolvedNormalRetryPolicy extends ResolvedRetryBackoff {
   readonly mode: 'normal'
   readonly maxRetries: number
+  /** @deprecated Retained for persisted-config compatibility; runtime retries every error. */
   readonly retryableCodes: readonly string[]
 }
 
-/** Fully resolved unbounded retry policy. */
+/** Fully resolved bounded all-error retry policy. */
 export interface ResolvedAlwaysRetryPolicy extends ResolvedRetryBackoff {
   readonly mode: 'always'
+  readonly maxRetries: number
 }
 
 /** Immutable provider policy captured when its adapter route is registered. */
@@ -93,6 +97,7 @@ const normalPolicySchema: z<NormalRetryPolicyConfig> = z.object({
 
 const alwaysPolicySchema: z<AlwaysRetryPolicyConfig> = z.object({
   mode: z.const('always').required(),
+  maxRetries: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_RETRIES),
   backoff: backoffSchema,
 })
 
@@ -105,7 +110,7 @@ export const RetryPolicySchema: z<RetryPolicyConfig> = z.union([
 const NORMAL_POLICY_KEYS: ReadonlySet<string> = new Set([
   'mode', 'maxRetries', 'retryableCodes', 'backoff',
 ])
-const ALWAYS_POLICY_KEYS: ReadonlySet<string> = new Set(['mode', 'backoff'])
+const ALWAYS_POLICY_KEYS: ReadonlySet<string> = new Set(['mode', 'maxRetries', 'backoff'])
 const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitterRatio'])
 
 function validateKeys(value: object, allowed: ReadonlySet<string>, path: string): void {
@@ -179,12 +184,18 @@ export function resolveRetryPolicy(
         ...resolveBackoff(config.backoff, `${path}.backoff`),
       })
     }
-    case 'always':
+    case 'always': {
       validateKeys(config, ALWAYS_POLICY_KEYS, path)
+      const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES
+      if (!Number.isSafeInteger(maxRetries) || maxRetries < 0) {
+        throw new Error(`${path}.maxRetries must be a non-negative safe integer`)
+      }
       return Object.freeze({
         mode: 'always',
+        maxRetries,
         ...resolveBackoff(config.backoff, `${path}.backoff`),
       })
+    }
     default:
       throw new Error(`${path}.mode must be "normal" or "always"`)
   }

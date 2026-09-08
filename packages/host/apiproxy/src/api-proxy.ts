@@ -114,6 +114,18 @@ import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-
 const DEFAULT_MAX_MESSAGES = 50
 
 /**
+ * Default event budget for one detached history tail window. Serves the
+ * default page (50 messages) with slack for message-heavy event runs; the
+ * read falls back to one whole-log inspection when a page needs more.
+ * Tool-heavy sessions spend dozens of events per message (dispatch chunks,
+ * turn/step boundaries), so a 2000-event window too often fails to cover one
+ * 50-message page and degrades to a whole-log read of multi-MB logs — the
+ * "slow history / history load failed" path. 10000 keeps the tail window the
+ * common path while still bounding decode cost.
+ */
+const DEFAULT_HISTORY_TAIL_EVENT_BUDGET = 10_000
+
+/**
  * Non-model settings namespaces intentionally served to the Web client. The
  * plugin-owned entries (`agent-loop`, `bash`, `web-search-deepseek`) are the
  * host-plane sections the plugin configuration page edits; a namespace absent
@@ -698,6 +710,14 @@ export interface ApiProxyDefaults {
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
   /**
+   * Event budget for one detached history tail window. The history endpoint
+   * decodes only this many newest events for a cold session and falls back to
+   * a whole-log inspection whenever a requested page reaches beyond the
+   * window. `0` disables the tail path entirely. Defaults to
+   * {@link DEFAULT_HISTORY_TAIL_EVENT_BUDGET}.
+   */
+  historyTailEventBudget?: number
+  /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
    * between opening a preset directory and answering its path as text.
@@ -869,12 +889,18 @@ function historyPage(
 /**
  * Which session a transcript read is served from. An attached session is the
  * live object and keeps appending, so its events and projection baseline are
- * read together in one synchronous step; a detached one is already a frozen
- * inspection.
+ * read together in one synchronous step; a detached one is either a bounded
+ * tail window (`windowed`: only the newest events were decoded, older pages
+ * re-read the whole log) or a whole-log frozen inspection.
  */
 type HistorySource =
   | { readonly kind: 'attached'; readonly session: Session }
-  | { readonly kind: 'detached'; readonly header: SessionHeader; readonly events: SessionEvent[] }
+  | {
+    readonly kind: 'detached'
+    readonly header: SessionHeader
+    readonly events: SessionEvent[]
+    readonly windowed?: true
+  }
 
 function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock | undefined {
   const registry = ctx.get('sessionProjections')
@@ -1146,6 +1172,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const historyTailEventBudget = defaults.historyTailEventBudget
+    ?? DEFAULT_HISTORY_TAIL_EVENT_BUDGET
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -1220,12 +1248,22 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     }
     installModelSelection(agent.ctx, selection)
     agent.ctx.tools?.guard((exec) => {
-      if (exec.name !== 'web_search') return undefined
-      const mode = selection.current.searchMode ?? 'auto'
-      if (mode === 'native') {
-        return 'This conversation delegates web search to the upstream model; DSH web_search is disabled.'
+      if (exec.name !== 'web_search' && exec.name !== 'web_fetch') return undefined
+      // 'off' disables local web tools entirely.
+      if (selection.current.searchMode === 'off') {
+        return exec.name === 'web_search'
+          ? 'Web search is disabled for this conversation.'
+          : 'Web fetch is disabled for this conversation.'
       }
-      if (mode === 'off') return 'Web search is disabled for this conversation.'
+      // 'native' hides the DSH web tools from the model so it uses the
+      // provider's built-in search instead of falling through to the local
+      // tool. Models that actually expose native search set nativeSearch=true
+      // in their resolved model info; for all others the UI will fall back.
+      if (selection.current.searchMode === 'native') {
+        return exec.name === 'web_search'
+          ? 'This conversation uses the model provider\'s native web search; the DSH web_search tool is hidden.'
+          : 'This conversation uses the model provider\'s native web path; the DSH web_fetch tool is hidden.'
+      }
       return undefined
     })
     selections.set(agent, selection)
@@ -1578,15 +1616,71 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * Resolve which session one transcript read is served from, without
    * acquiring an Agent owner. This is the read's only asynchronous step
    * besides ensuring the composition; {@link historyCutOf} takes the cut.
+   * A cold session first reads a bounded tail window (only the newest events
+   * decoded — the Zstd backend decompresses just the header and tail frames),
+   * falling back to one whole-log inspection whenever the requested page
+   * cannot be served from the window.
    * @param sessionId - the transcript being read.
-   * @returns the attached session, or the inspected detached header and events.
+   * @param beforeSeq - the page cut being requested (`undefined` = tail page).
+   * @param maxMessages - the message quota the page must be able to fill.
+   * @returns the attached session, or the detached header and events.
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
-  async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+  async function historySourceFor(
+    sessionId: SessionId,
+    beforeSeq: number | undefined,
+    maxMessages: number,
+  ): Promise<HistorySource> {
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
+    if (historyTailEventBudget > 0) {
+      const window = await tailWindowFor(sessionId, beforeSeq, maxMessages)
+      if (window !== undefined) {
+        return { kind: 'detached', ...window, windowed: true }
+      }
+    }
     const inspected = await inspectServable(sessionId)
     return { kind: 'detached', header: inspected.meta, events: inspected.events }
+  }
+
+  /**
+   * One bounded detached tail window, or `undefined` when the requested page
+   * cannot be served from it. A window that covers the whole stored log serves
+   * any page; a truncated window serves a tail page only while it can still
+   * fill the message quota (otherwise pagination would report `hasMore` false
+   * with older messages on disk) and a forward page only while its cut stays
+   * inside the window.
+   * @param sessionId - the cold transcript being read.
+   * @param beforeSeq - the page cut being requested (`undefined` = tail page).
+   * @param maxMessages - the message quota the page must be able to fill.
+   * @returns the windowed header and events, or `undefined` to read the whole log.
+   */
+  async function tailWindowFor(
+    sessionId: SessionId,
+    beforeSeq: number | undefined,
+    maxMessages: number,
+  ): Promise<{ header: SessionHeader; events: SessionEvent[] } | undefined> {
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) return undefined
+    let tail: { meta: SessionHeader; events: SessionEvent[]; hasMore: boolean }
+    try {
+      tail = await persistence.readTail(sessionId, historyTailEventBudget)
+    } catch (error: unknown) {
+      // Not-found surfaces as the ordinary whole-log read's failure; every
+      // other backend failure falls back to that same read rather than
+      // blocking transcript access.
+      ctx.logger.warn(`history: tail window for "${sessionId}" failed (falling back to whole-log read): ${String(error)}`)
+      return undefined
+    }
+    if (!tail.hasMore) return { header: tail.meta, events: tail.events }
+    const headSeq = tail.events[0]?.seq
+    if (headSeq === undefined) return undefined
+    if (beforeSeq !== undefined) return beforeSeq > headSeq ? { header: tail.meta, events: tail.events } : undefined
+    // Tail page: `paginate` reporting `hasMore` false means the message quota
+    // is unfillable inside the window while older messages remain stored.
+    return paginate(tail.events, undefined, maxMessages).hasMore
+      ? { header: tail.meta, events: tail.events }
+      : undefined
   }
 
   /**
@@ -1617,7 +1711,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     includeProjections: boolean,
   ): { events: SessionEvent[]; projections?: SessionProjectionsBlock } {
     if (source.kind === 'detached') {
-      const projections = includeProjections ? detachedProjectionsFor(ctx, source.events) : undefined
+      // A windowed source cannot fold its baseline from the window alone
+      // (stateful units need the whole log): serve the persisted projection
+      // cache's identity-checked rows instead — the same fail-soft column
+      // `session.list` serves, absent on any miss and superseded by the live
+      // baseline once the session is actually opened.
+      const projections = includeProjections
+        ? source.windowed === true
+          ? listProjectionsFor(ctx, source.header, undefined)
+          : detachedProjectionsFor(ctx, source.events)
+        : undefined
       return { events: source.events, ...projections === undefined ? {} : { projections } }
     }
     const events = [...source.session.events]
@@ -2294,7 +2397,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       async history(request) {
         const { sessionId, beforeSeq, maxMessages } = request.payload
         try {
-          const source = await historySourceFor(sessionId)
+          const source = await historySourceFor(sessionId, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
           // Both awaits happen BEFORE the cut. Ensuring the recorded
           // composition's standing mount is what registers its projection
           // units, so a first cold read would otherwise serve a baseline
@@ -2544,9 +2647,6 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
                   && modelInfo?.inputModalities !== undefined
                   && !modelInfo.inputModalities.includes('image'))
               if (shouldBridge) {
-                // A text-only model cannot receive image bytes. When a vision
-                // bridge is mounted, caption each image into text so the model
-                // still consumes the image's content; otherwise refuse as before.
                 const bridge = (ctx as unknown as { get(name: string): unknown }).get('visionBridge') as
                   | VisionCaptionBridge
                   | undefined

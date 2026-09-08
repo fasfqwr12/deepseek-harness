@@ -396,46 +396,62 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
-  it('allows DSH web_search in auto/dsh and rejects it in native/off with explicit reasons', async () => {
+  it('allows DSH web_search/web_fetch in auto/dsh and rejects them in native/off with explicit reasons', async () => {
     const { ctx, agent, sessionId } = await harness()
     const executeSearch = vi.fn(() => Promise.resolve([{ type: 'text' as const, text: 'searched' }]))
+    const executeFetch = vi.fn(() => Promise.resolve([{ type: 'text' as const, text: 'fetched' }]))
     ctx.tools.register(defineContentToolFixture({
       name: 'web_search', description: 'test search', parameters: {}, execute: executeSearch,
+    }))
+    ctx.tools.register(defineContentToolFixture({
+      name: 'web_fetch', description: 'test fetch', parameters: {}, execute: executeFetch,
     }))
     const api = createApiProxy(ctx, {
       defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }), cwd: '/tmp',
     })
     expectValue(await api.sessions.models(request({ sessionId })))
 
-    const run = () => ctx.tools.execute({
+    const runSearch = () => ctx.tools.execute({
       callId: CallId(`search-${String(executeSearch.mock.calls.length)}`), name: 'web_search', arguments: {},
+      signal: new AbortController().signal, agent,
+    })
+    const runFetch = () => ctx.tools.execute({
+      callId: CallId(`fetch-${String(executeFetch.mock.calls.length)}`), name: 'web_fetch', arguments: {},
       signal: new AbortController().signal, agent,
     })
     for (const mode of ['auto', 'dsh'] as const) {
       expectValue(await api.sessions.selectModel(request({
         sessionId, provider: 'deepseek-official', model: 'deepseek-chat', searchMode: mode,
       })))
-      const result = await run()
-      expect(result.isError).toBe(false)
-      expect(result.content).toEqual([{ type: 'text', text: 'searched' }])
+      const searchResult = await runSearch()
+      expect(searchResult.isError).toBe(false)
+      expect(searchResult.content).toEqual([{ type: 'text', text: 'searched' }])
+      const fetchResult = await runFetch()
+      expect(fetchResult.isError).toBe(false)
+      expect(fetchResult.content).toEqual([{ type: 'text', text: 'fetched' }])
     }
 
     expectValue(await api.sessions.selectModel(request({
       sessionId, provider: 'deepseek-official', model: 'deepseek-chat', searchMode: 'native',
     })))
-    const native = await run()
-    expect(native.isError).toBe(true)
-    expect(native.content).toEqual([{
-      type: 'text', text: 'Error: This conversation delegates web search to the upstream model; DSH web_search is disabled.',
-    }])
+    const nativeSearch = await runSearch()
+    expect(nativeSearch.isError).toBe(true)
+    expect(nativeSearch.content).toEqual([{ type: 'text', text: 'Error: This conversation uses the model provider\'s native web search; the DSH web_search tool is hidden.' }])
+    const nativeFetch = await runFetch()
+    expect(nativeFetch.isError).toBe(true)
+    expect(nativeFetch.content).toEqual([{ type: 'text', text: 'Error: This conversation uses the model provider\'s native web path; the DSH web_fetch tool is hidden.' }])
 
     expectValue(await api.sessions.selectModel(request({
       sessionId, provider: 'deepseek-official', model: 'deepseek-chat', searchMode: 'off',
     })))
-    const off = await run()
-    expect(off.isError).toBe(true)
-    expect(off.content).toEqual([{ type: 'text', text: 'Error: Web search is disabled for this conversation.' }])
+    const offSearch = await runSearch()
+    expect(offSearch.isError).toBe(true)
+    expect(offSearch.content).toEqual([{ type: 'text', text: 'Error: Web search is disabled for this conversation.' }])
+    const offFetch = await runFetch()
+    expect(offFetch.isError).toBe(true)
+    expect(offFetch.content).toEqual([{ type: 'text', text: 'Error: Web fetch is disabled for this conversation.' }])
     expect(executeSearch).toHaveBeenCalledTimes(2)
+    expect(executeFetch).toHaveBeenCalledTimes(2)
     await ctx.fiber.dispose()
   })
 

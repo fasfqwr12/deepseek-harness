@@ -137,9 +137,13 @@ function normalConfig(
   }
 }
 
-function alwaysConfig(backoff: BackoffConfig = {}): AlwaysRetryPolicyConfig {
+function alwaysConfig(
+  overrides: BackoffConfig & { maxRetries?: number } = {},
+): AlwaysRetryPolicyConfig {
+  const { maxRetries = 2, ...backoff } = overrides
   return {
     mode: 'always',
+    maxRetries,
     backoff: {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
@@ -198,7 +202,7 @@ describe('provider-routed retry policy', () => {
       step: 1,
       provider: 'mock',
       mode: 'normal',
-      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],500,10000,0]',
+      policyKey: '["normal",2,500,10000,0]',
       retry: 1,
       maxRetries: 2,
       delayMs: 500,
@@ -364,74 +368,43 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests).toHaveLength(2)
   })
 
-  it('uses a bounded provider Retry-After verbatim and delegates an over-cap instruction', async () => {
-    vi.useFakeTimers()
-    const accepted = new ScriptedAdapter([
-      new LlmError('wait', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
-      textResponse('done'),
-    ])
-    ;({ ctx: context } = await harness(accepted, { mock: normalConfig({
-      backoff: { jitterRatio: 1 },
-    }) }))
-    const acceptedAgent = context.agentLoop.create(SessionId('retry-after-accepted'), { provider: 'mock', model: 'mock' })
-    const scheduled = waitForRetry(context, acceptedAgent, 1)
-    acceptedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    expect((await scheduled).data.delayMs).toBe(2_000)
-    const acceptedIdle = waitForIdle(context, acceptedAgent)
-    await vi.advanceTimersByTimeAsync(2_000)
-    await acceptedIdle
-    expect(accepted.requests).toHaveLength(2)
-
-    await context.fiber.dispose()
-    const rejected = new ScriptedAdapter([
-      new LlmError('wait too long', 'RATE_LIMIT', { providerRetryAfterMs: 10_001 }),
-    ])
-    ;({ ctx: context } = await harness(rejected))
-    const rejectedAgent = context.agentLoop.create(SessionId('retry-after-rejected'), { provider: 'mock', model: 'mock' })
-    const rejectedIdle = waitForIdle(context, rejectedAgent)
-    rejectedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    await rejectedIdle
-    expect(rejected.requests).toHaveLength(1)
-    expect(rejectedAgent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
-  })
-
-  it('uses local jittered backoff when always mode receives an over-cap Retry-After', async () => {
+  it('uses local backoff for an over-cap Retry-After and retries every error', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
-      new LlmError('wait too long', 'AUTH', { providerRetryAfterMs: 10 }),
-      textResponse('done'),
+      new LlmError('wait too long', 'AUTH', { providerRetryAfterMs: 10_001 }),
+      textResponse('recovered'),
     ])
-    ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
-      initialDelayMs: 2,
-      maxDelayMs: 4,
-      jitterRatio: 0.5,
-    }) }, undefined, { random: () => 1 }))
-    const agent = context.agentLoop.create(SessionId('retry-always-over-cap'), {
-      provider: 'mock',
-      model: 'mock',
-    })
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { initialDelayMs: 2, maxDelayMs: 4, jitterRatio: 0 },
+    }) }))
+    const agent = context.agentLoop.create(SessionId('retry-after-over-cap'), { provider: 'mock', model: 'mock' })
     const scheduled = waitForRetry(context, agent, 1)
-
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    expect((await scheduled).data.delayMs).toBe(3)
+    expect((await scheduled).data.delayMs).toBe(2)
     const idle = waitForIdle(context, agent)
-    await vi.advanceTimersByTimeAsync(3)
+    await vi.advanceTimersByTimeAsync(2)
     await idle
-
     expect(adapter.requests).toHaveLength(2)
   })
 
-  it('delegates non-transient failures without scheduling a timer', async () => {
+  it('retries auth errors to the configured limit', async () => {
     vi.useFakeTimers()
-    const adapter = new ScriptedAdapter([new LlmError('bad key', 'AUTH')])
-    ;({ ctx: context } = await harness(adapter))
-    const agent = context.agentLoop.create(SessionId('retry-auth'), { provider: 'mock', model: 'mock' })
+    const adapter = new ScriptedAdapter([
+      new LlmError('bad key one', 'AUTH'),
+      new LlmError('bad key two', 'AUTH'),
+      new LlmError('bad key three', 'AUTH'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      maxRetries: 2,
+      backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+    }) }))
+    const agent = context.agentLoop.create(SessionId('retry-auth-bounded'), { provider: 'mock', model: 'mock' })
     const idle = waitForIdle(context, agent)
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await vi.runAllTimersAsync()
     await idle
-    expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
-    expect(vi.getTimerCount()).toBe(0)
+    expect(adapter.requests).toHaveLength(3)
+    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(2)
   })
 
   it('delegates when no final adapter served the failed request', async () => {
@@ -460,43 +433,57 @@ describe('provider-routed retry policy', () => {
     }
   })
 
-  it('selects policy by the failed request provider', async () => {
+  it('selects bounded all-error policy by the failed request provider', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
       new LlmError('mock auth failed', 'AUTH'),
+      textResponse('mock recovered'),
       new LlmError('other auth failed', 'AUTH'),
       textResponse('other recovered'),
     ])
     ;({ ctx: context } = await harness(adapter, {
-      other: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }),
+      mock: normalConfig({
+        maxRetries: 1,
+        backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      }),
+      other: alwaysConfig({ maxRetries: 1, initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 }),
     }))
 
     const normalAgent = context.agentLoop.create(SessionId('retry-provider-normal'), {
       provider: 'mock',
       model: 'mock',
     })
-    const normalIdle = waitForIdle(context, normalAgent)
+    const normalScheduled = waitForRetry(context, normalAgent, 1)
     normalAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'normal' }], source: { kind: 'user' } }))
+    expect((await normalScheduled).data).toMatchObject({
+      provider: 'mock',
+      mode: 'normal',
+      retry: 1,
+      maxRetries: 1,
+      delayMs: 1,
+    })
+    const normalIdle = waitForIdle(context, normalAgent)
+    await vi.advanceTimersByTimeAsync(1)
     await normalIdle
-    expect(normalAgent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
 
     const alwaysAgent = context.agentLoop.create(SessionId('retry-provider-always'), {
       provider: 'other',
       model: 'mock',
     })
-    const scheduled = waitForRetry(context, alwaysAgent, 1)
+    const alwaysScheduled = waitForRetry(context, alwaysAgent, 1)
     alwaysAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'always' }], source: { kind: 'user' } }))
-    expect((await scheduled).data).toMatchObject({
+    expect((await alwaysScheduled).data).toMatchObject({
       provider: 'other',
       mode: 'always',
       retry: 1,
+      maxRetries: 1,
       delayMs: 1,
     })
     const alwaysIdle = waitForIdle(context, alwaysAgent)
     await vi.advanceTimersByTimeAsync(1)
     await alwaysIdle
 
-    expect(adapter.requests.map(request => request.provider)).toEqual(['mock', 'other', 'other'])
+    expect(adapter.requests.map(request => request.provider)).toEqual(['mock', 'mock', 'other', 'other'])
   })
 
   it('selects an always policy from the provider chosen by agent/request', async () => {
@@ -651,7 +638,7 @@ describe('provider-routed retry policy', () => {
     },
   )
 
-  it('keeps always mode unbounded while preserving cancellable jittered backoff', async () => {
+  it('keeps always mode bounded while preserving cancellable jittered backoff', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
       new LlmError('auth one', 'AUTH'),
@@ -661,11 +648,12 @@ describe('provider-routed retry policy', () => {
       textResponse('eventually recovered'),
     ])
     ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
+      maxRetries: 4,
       initialDelayMs: 1,
       maxDelayMs: 4,
       jitterRatio: 0.1,
     }) }, undefined, { random: () => 1 }))
-    const agent = context.agentLoop.create(SessionId('retry-always-unbounded'), {
+    const agent = context.agentLoop.create(SessionId('retry-always-bounded'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -682,12 +670,12 @@ describe('provider-routed retry policy', () => {
       mode: event.data.mode,
       retry: event.data.retry,
       delayMs: event.data.delayMs,
-      hasMax: 'maxRetries' in event.data,
+      maxRetries: event.data.maxRetries,
     }))).toEqual([
-      { provider: 'mock', mode: 'always', retry: 1, delayMs: 1.1, hasMax: false },
-      { provider: 'mock', mode: 'always', retry: 2, delayMs: 2.2, hasMax: false },
-      { provider: 'mock', mode: 'always', retry: 3, delayMs: 4, hasMax: false },
-      { provider: 'mock', mode: 'always', retry: 4, delayMs: 4, hasMax: false },
+      { provider: 'mock', mode: 'always', retry: 1, delayMs: 1.1, maxRetries: 4 },
+      { provider: 'mock', mode: 'always', retry: 2, delayMs: 2.2, maxRetries: 4 },
+      { provider: 'mock', mode: 'always', retry: 3, delayMs: 4, maxRetries: 4 },
+      { provider: 'mock', mode: 'always', retry: 4, delayMs: 4, maxRetries: 4 },
     ])
   })
 

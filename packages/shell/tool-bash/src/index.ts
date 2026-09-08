@@ -67,6 +67,36 @@ function validateBashArgs(args: BashToolArgs): void {
   validateEscalationArgs(args.sandbox_permissions, args.justification)
 }
 
+/**
+ * Fixed read-only command strings the scheduler may overlap. Exact-match
+ * only: no prefixes, no patterns — any other shell syntax stays an
+ * exclusive barrier, and the model can never self-declare concurrency.
+ */
+const READ_ONLY_BASH_COMMANDS: ReadonlySet<string> = new Set([
+  'pwd',
+  'ls',
+  'ls -la',
+  'git status',
+  'git status --short',
+  'git branch',
+  'git log --oneline -20',
+  'git diff --stat',
+])
+
+/**
+ * The scheduler trusts only this host-owned allowlist. The model cannot mark an
+ * arbitrary command as concurrent, and any shell syntax beyond these fixed
+ * read-only commands remains an exclusive barrier.
+ */
+function isFixedReadOnlyBashCommand(args: unknown): boolean {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return false
+  const value = args as Partial<BashToolArgs>
+  return typeof value.command === 'string' && READ_ONLY_BASH_COMMANDS.has(value.command)
+    && value.run_in_background !== true
+    && value.sandbox_permissions === undefined
+    && value.justification === undefined
+}
+
 function bashDescription(backgroundEnabled: boolean, escalationModes: readonly SandboxMode[]): string {
   const background = backgroundEnabled
     ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
@@ -236,12 +266,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.systemPrompt.section({
     name: 'tool:bash',
     order: 105,
-    text: 'Check the [exit code: N] marker on every bash result; investigate failures before moving on.',
+    text: 'Issue independent read/search/fetch calls together in one response. Shell calls overlap only when the host classifies their exact command as safe; never claim a command is parallel-safe yourself. The host already classifies these fixed read-only probes as safe and overlaps them: `pwd`, `ls`, `ls -la`, `git status`, `git status --short`, `git branch`, `git log --oneline -20`, `git diff --stat` — issue them together in one response when independent. Check the [exit code: N] marker on every bash result; investigate failures before moving on.',
   })
 
   ctx.tools.register(defineTool({
     name: 'bash',
     description: bashDescription(backgroundEnabled, escalationModes),
+    isConcurrencySafe: isFixedReadOnlyBashCommand,
     parameters: {
       command: { type: 'string', required: true, description: 'The bash command to execute.' },
       description: {

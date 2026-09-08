@@ -41,6 +41,16 @@ export const WIDER_MODES: Record<string, readonly SandboxMode[]> = {
 export const ESCALATION_TARGETS: readonly SandboxMode[] = ['workspace-write', 'danger-full-access']
 
 /**
+ * Whether a mode is one of the closed {@link SandboxMode} values. An effective
+ * mode outside the vocabulary (a malformed session event) cannot be reasoned
+ * about, so escalation against it fails closed instead of no-op'ing.
+ * @param mode - the mode to test.
+ */
+function isKnownMode(mode: SandboxMode): boolean {
+  return mode === 'read-only' || mode === 'workspace-write' || mode === 'danger-full-access'
+}
+
+/**
  * Validate the escalation argument pairing a tool schema cannot express:
  * `sandbox_permissions` and `justification` travel together — an approval
  * prompt without a reason, or a reason driving nothing, is a malformed ask —
@@ -141,24 +151,37 @@ export interface EscalationRequest {
 }
 
 /**
- * Resolve a sandbox-escalation request BEFORE anything executes: check strict
- * widening against the call's effective mode, then resolve the approval
- * channel, then map every outcome — the ordered fail-closed sequence both
- * enforcing families share. Returns the granted mode to stamp onto exactly
- * this call; throws the distinct verbatim text for every other path (a
- * non-widening request, a missing approval service, an agent-less execution,
- * a rejection, a cancellation, an unanswerable ask) — the tool registry turns
- * the throw into the call's isError result, and nothing has run. A
- * non-widening request never prompts a human.
+ * Resolve a sandbox-escalation request BEFORE anything executes: a request
+ * that does not widen the call's mode is the no-op it is (the call already
+ * runs at least as privileged as asked), so it resolves to the standing mode
+ * without an approval prompt; only a strictly-wider request resolves through
+ * the approval channel, then maps every outcome — the ordered fail-closed
+ * sequence both enforcing families share. Returns the granted mode to stamp
+ * onto exactly this call; throws the distinct verbatim text for every other
+ * path (an UNKNOWN standing mode, a missing approval service, an agent-less
+ * execution, a rejection, a cancellation, an unanswerable ask) — the tool
+ * registry turns the throw into the call's isError result, and nothing has
+ * run. A request that does not widen never prompts a human.
  * @param request - the escalation to judge (see {@link EscalationRequest}).
  * @param approval - the approval ingredients the tool holds (see {@link EscalationApproval}).
  * @returns the granted mode, consumed by the one call that asked.
  */
 export async function approveEscalation<A, C>(request: EscalationRequest, approval: EscalationApproval<A, C>): Promise<SandboxMode> {
   const { requestedMode: mode, effectiveMode, justification, subject } = request
+  // A request for a mode the call does not strictly widen grants nothing new:
+  // the call already runs at least as privileged as asked, so resolve to the
+  // standing mode without an approval prompt. Outer adapters sometimes stamp
+  // sandbox_permissions onto every call, so a same-level (or narrower) request
+  // must not fail the very call it was redundant for. The ONE fail-closed case
+  // is an UNKNOWN standing mode: without knowing it we cannot reason about
+  // what the request would grant.
+  if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode as SandboxMode) && isKnownMode(effectiveMode)) {
+    return effectiveMode
+  }
   // Strict widening is an EXECUTION check against the call's effective mode —
   // deliberately not a schema constraint (the enum is the closed target
-  // vocabulary; the effective mode is per-call truth).
+  // vocabulary; the effective mode is per-call truth). An unknown standing
+  // mode falls through to here and fails closed below.
   if (!(WIDER_MODES[effectiveMode] ?? []).includes(mode as SandboxMode)) {
     throw new Error(`sandbox escalation to "${mode}" is not strictly wider than this call's current "${effectiveMode}" mode`)
   }
