@@ -17,6 +17,10 @@ import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import Storage from '@deepseek-ai/dsh-storage'
+import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
+import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
+import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 import {
   PersistenceCoordinator,
   SessionPersistenceRevision,
@@ -25,6 +29,7 @@ import {
 } from '@deepseek-ai/dsh-session-persistence'
 import type { RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
+import type { HostFrame } from '@deepseek-ai/dsh-host-apiproxy/api/events'
 import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 
 const sid = (id: string): SessionId => id as SessionId
@@ -951,21 +956,43 @@ describe('idle auto-detach', () => {
     stubs: Map<SessionId, IdleStub>
   }
 
-  async function mountIdle(idleMs: number): Promise<IdleBench> {
+  async function mountIdle(idleMs: number, options?: { realDispose?: boolean }): Promise<IdleBench> {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(UserQuestionService)
+    // Real-dispose mode drives the host event stream, which baselines against
+    // the workspace registry: mount the same minimal Storage/Domain/Workspace
+    // composition the workspace spec's harness uses.
+    const realDispose = options?.realDispose === true
+    if (realDispose) {
+      await ctx.plugin(Storage)
+      ctx.storage.backend.register('memory', new MemoryStorageBackend())
+      const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
+      ctx.storage.mount('domain', storageDomain)
+      ctx.provide('storageDomain', storageDomain)
+      ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+      await ctx.plugin(WorkspaceRegistry)
+    }
     const root = mkdtempSync(join(tmpdir(), 'dsh-idle-'))
     const api = createApiProxy(ctx, {
       defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
       cwd: '/tmp',
       sessionIdleDetachMs: idleMs,
     })
-    const dispose = vi.fn(() => Promise.resolve())
+    const detaches: Array<() => void> = []
+    const dispose = vi.fn(realDispose
+      ? async () => { for (const detach of detaches.splice(0)) detach() }
+      : async () => {})
     const stubs = new Map<SessionId, IdleStub>()
     vi.spyOn(ctx.agents, 'create').mockImplementation(async (options) => {
-      const session = ctx.sessions.create(options.sessionId, options.meta === undefined ? {} : { meta: options.meta })
+      const session = realDispose
+        ? ctx.sessions.prepare(options.sessionId, options.meta === undefined ? {} : { meta: options.meta })
+        : ctx.sessions.create(options.sessionId, options.meta === undefined ? {} : { meta: options.meta })
+      if (realDispose) {
+        detaches.push(ctx.sessions.enter(session))
+        ctx.sessions.announce(session)
+      }
       const stub: IdleStub & { session: Session; ctx: Context } = {
         id: session.id, session, status: 'idle', ctx,
       }
@@ -1042,5 +1069,41 @@ describe('idle auto-detach', () => {
     bystander.append('turn/start', { turn: 1 })
     await wait(20)
     expect(bench.dispose).not.toHaveBeenCalled()
+  })
+
+  it('streams no host/session-removed for an idle detach, while a genuine disposal still notifies', async () => {
+    const bench = await mountIdle(20, { realDispose: true })
+    const session = await createOwned(bench, 'session-idle-stream')
+    const bystander = bystanderFor(bench, 'session-idle-stream-bystander')
+
+    // Announced before the stream opens: the manual session's creation frame
+    // is not queued, so only its later genuine disposal reaches the stream.
+    const manual = bench.ctx.sessions.prepare(sid('session-idle-stream-manual'), { meta: { cwd: '/proj' } })
+    const manualDetach = bench.ctx.sessions.enter(manual)
+    bench.ctx.sessions.announce(manual)
+
+    const abort = new AbortController()
+    const stream: AsyncIterator<RpcRequest<HostFrame>> =
+      bench.api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
+
+    // The sweep disposes the idle-owned agent: the session leaves the store
+    // (its log stays in persistence), and the stream must stay silent — the
+    // sidebar row survives as the entry point of the transparent resume.
+    await wait(40)
+    bystander.append('turn/start', { turn: 1 })
+    await vi.waitFor(() => expect(bench.ctx.sessions.get(session.id)).toBeUndefined())
+    await wait(30) // the idle-detach marker clears once disposal settles
+
+    // A session the proxy never owned leaves the store through a genuine
+    // disposal: that one still streams the removal frame, and it is the FIRST
+    // frame after the silent sweep (an idle-detach frame would land here).
+    const next = stream.next()
+    manualDetach()
+    const settled = await next
+    expect(settled.done).toBe(false)
+    expect(settled.value).toMatchObject({
+      payload: { type: 'host/session-removed', sessionId: manual.id },
+    })
+    abort.abort()
   })
 })

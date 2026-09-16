@@ -1213,6 +1213,16 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const ownedAgents = new Map<SessionId, AgentHandle>()
   /** Last appended-event time per attached session; drives idle auto-detach. */
   const agentActivity = new Map<SessionId, number>()
+  /**
+   * Sessions whose disposal the idle sweep initiated. Disposal removes them
+   * from the in-memory store while their logs stay in persistence (the next
+   * interaction resumes them transparently), so the `session/disposed` they
+   * fire inside dispose must not reach clients as `host/session-removed` —
+   * that frame deletes the sidebar row the resume path needs as its entry.
+   * Entries drop once the disposal settles, so a later genuine disposal of
+   * the same id still notifies.
+   */
+  const idleDetached = new Set<SessionId>()
 
   /** Dispose attached agents that saw no appended event for the idle interval. */
   function sweepIdleAgents(): void {
@@ -1227,10 +1237,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       agentActivity.delete(id)
       // Disposal aborts the agent's lifecycle, drains its final events into
       // the JSONL log, and removes the session from the store — the next
-      // interaction resumes it from storage transparently.
-      void handle.dispose().catch((error: unknown) => {
-        ctx.logger.warn(`session "${id}": idle auto-detach failed: ${String(error)}`)
-      })
+      // interaction resumes it from storage transparently. The marker keeps
+      // the in-dispose `session/disposed` from being forwarded as a client
+      // row removal (see idleDetached); it clears when disposal settles.
+      idleDetached.add(id)
+      void handle.dispose()
+        .catch((error: unknown) => {
+          ctx.logger.warn(`session "${id}": idle auto-detach failed: ${String(error)}`)
+        })
+        .then(() => { idleDetached.delete(id) })
     }
   }
 
@@ -3834,6 +3849,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }))
           }),
           ctx.on('session/disposed', (session: Session) => {
+            // Idle auto-detach removes the session from the store while its
+            // log stays in persistence (transparent resume on next
+            // interaction); forwarding that as a removal would drop the
+            // sidebar row with nothing left to click back to. Genuine
+            // disposals still notify.
+            if (idleDetached.has(session.id)) return
             queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
           }),
           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
