@@ -6,6 +6,9 @@ import css from './MessageImage.module.css'
 
 /** Loads a session-authorized durable image URL. */
 export type ImageLoader = (attachment: ImageAttachmentRef) => Promise<string>
+/** Releases the mount claim taken by a paired {@link ImageLoader} call, so
+ * the owning blob URL becomes eligible for bounded-cache eviction. */
+export type ImageReleaser = (attachment: ImageAttachmentRef) => void
 
 /** Message-image strings the owner resolves from its own locale namespace. */
 export interface MessageImageLabels {
@@ -47,13 +50,15 @@ function singleFit(attachment: ImageAttachmentRef): { width: number; height: num
  *
  * @param props.attachment - the durable image reference to load and bound.
  * @param props.load - session-authorized URL loader.
+ * @param props.release - optional paired claim release invoked on unmount.
  * @param props.variant - `single` for a message's lone image, `tile` otherwise.
  * @param props.labels - resolved strings (tooltip, loading, retry, lightbox).
  * @returns the bounded thumbnail button, or the retry control on failure.
  */
-export function MessageImage({ attachment, load, variant, labels }: {
+export function MessageImage({ attachment, load, release, variant, labels }: {
   attachment: ImageAttachmentRef
   load: ImageLoader
+  release?: ImageReleaser | undefined
   variant: 'single' | 'tile'
   labels: MessageImageLabels
 }) {
@@ -75,8 +80,10 @@ export function MessageImage({ attachment, load, variant, labels }: {
     setError(false)
     setSrc(null)
     void load(attachment).then((url) => { if (live) setSrc(url) }).catch(() => { if (live) setError(true) })
-    return () => { live = false }
-  }, [attachment, load, attempt])
+    // Every load owns one cache claim; dropping it on cleanup (unmount,
+    // retry, attachment swap) lets the service evict unseen image bytes.
+    return () => { live = false; release?.(attachment) }
+  }, [attachment, load, release, attempt])
 
   const label = attachment.name ?? labels.image
   if (error) return <button type="button" className={css.error} data-variant={variant} onClick={request}>{labels.loadFailed}</button>
@@ -102,9 +109,10 @@ export function MessageImage({ attachment, load, variant, labels }: {
 
 /** Wrapping image group shared by user and assistant history: a lone image
  * renders large, several render as 64px square tiles (DeepSeek Chat rule). */
-export function ImageGallery({ images, load, align, labels }: {
+export function ImageGallery({ images, load, release, align, labels }: {
   images: readonly { attachment: ImageAttachmentRef }[]
   load: ImageLoader
+  release?: ImageReleaser | undefined
   align: 'start' | 'end'
   labels: MessageImageLabels
 }) {
@@ -113,7 +121,14 @@ export function ImageGallery({ images, load, align, labels }: {
   return (
     <div className={css.gallery} data-align={align}>
       {images.map((image, index) => (
-        <MessageImage key={`${image.attachment.attachmentId}:${index}`} {...image} load={load} variant={variant} labels={labels} />
+        <MessageImage
+          key={`${image.attachment.attachmentId}:${index}`}
+          {...image}
+          load={load}
+          release={release}
+          variant={variant}
+          labels={labels}
+        />
       ))}
     </div>
   )

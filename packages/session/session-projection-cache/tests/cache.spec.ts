@@ -21,6 +21,7 @@ import SessionProjectionCache from '../src/index.ts'
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
+    'cache-test/boom': { boom: boolean }
   }
 }
 
@@ -35,11 +36,15 @@ declare module '@deepseek-ai/dsh-session/types' {
 }
 
 type MarksState = { marks: string[] } | null
-const marksUnit = (stateVersion = 1): ProjectionDefinition<'cache-test/marks', MarksState> => ({
+const marksUnit = (
+  stateVersion = 1,
+  apply: (state: MarksState, event: SessionEvent) => MarksState = (state, event) =>
+    event.type === 'cache-test/mark' ? (event).data : state,
+): ProjectionDefinition<'cache-test/marks', MarksState> => ({
   key: 'cache-test/marks',
   schema: z.object({ marks: z.array(z.string()) }),
   init: () => null,
-  apply: (state, event) => (event.type === 'cache-test/mark' ? (event).data : state),
+  apply,
   view: state => state ?? { marks: [] },
   stateVersion,
 })
@@ -66,6 +71,7 @@ interface HarnessOptions {
   config?: { writeEveryEvents: number; writeIntervalMs: number }
   stateVersion?: number
   logs?: Map<string, SessionEvent[]>
+  marksApply?: (state: MarksState, event: SessionEvent) => MarksState
 }
 
 const contexts: Context[] = []
@@ -82,7 +88,7 @@ async function harness(options: HarnessOptions = {}) {
   ctx.provide('storageDomain', facility)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
-  ctx.sessionProjections.register(marksUnit(options.stateVersion))
+  ctx.sessionProjections.register(marksUnit(options.stateVersion, options.marksApply))
   const persistence = fakePersistence(logs)
   ctx.provide('sessionPersistence', persistence as never)
   const fiber = await ctx.plugin(SessionProjectionCache, options.config ?? { writeEveryEvents: 100, writeIntervalMs: 60_000 })
@@ -383,5 +389,148 @@ describe('SessionProjectionCache cold read', () => {
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('absent'))).rejects.toThrow('not found')
     await expect(ctx.sessionProjectionCache.coldSnapshot(SessionId('bare')))
       .resolves.toEqual({ asOfSeq: 2, values: {} })
+  })
+})
+
+describe('SessionProjectionCache live-cell seeding', () => {
+  const createdAt = 7
+  const meta = { createdAt }
+
+  /** Harness whose marks unit records every seq its apply sees. */
+  async function recordingHarness() {
+    const applies: number[] = []
+    const { ctx, pool } = await harness({
+      marksApply: (state, event) => {
+        applies.push(event.seq)
+        return event.type === 'cache-test/mark' ? (event).data : state
+      },
+    })
+    return { ctx, pool, applies }
+  }
+
+  /** Write one identity-matched row for a turn-ended session, then dispose it. */
+  async function writeRow(
+    ctx: Context,
+    id: SessionId,
+    session: (live: Session) => void,
+  ): Promise<readonly SessionEvent[]> {
+    let events: readonly SessionEvent[] = []
+    const owner = await ctx.plugin(Object.assign((inner: Context) => {
+      const live = inner.sessions.create(id, { meta })
+      session(live)
+      events = live.events
+    }, { inject: ['sessions'] }))
+    await owner.dispose()
+    await settle()
+    return events
+  }
+
+  it('seeds live cells from the identity-matched row and replays only the tail past its watermark', async () => {
+    const { ctx, pool, applies } = await recordingHarness()
+    const id = SessionId('seed-tail')
+    const firstEvents = await writeRow(ctx, id, (live) => {
+      mark(live, ['a'])
+      endTurn(live) // mandatory write point: the row lands at the turn/end seq
+    })
+    expect(storedRows(pool, id)?.['cache-test/marks']?.seq).toBe(1)
+    const beforeSecond = applies.length
+    const second = ctx.sessions.create(id, { meta, seed: firstEvents })
+    // Only the constructor's end-seed marker replays; the seed events were
+    // covered by the row and never re-applied.
+    expect(applies.slice(beforeSecond)).toEqual([2])
+    expect(ctx.sessionProjections.snapshot(second).values['cache-test/marks']).toEqual({ marks: ['a'] })
+    mark(second, ['b'])
+    expect(ctx.sessionProjections.snapshot(second).values['cache-test/marks']).toEqual({ marks: ['b'] })
+  })
+
+  it('does not seed cells when the persisted row belongs to another lifecycle identity', async () => {
+    const { ctx, applies } = await recordingHarness()
+    const id = SessionId('seed-id')
+    const firstEvents = await writeRow(ctx, id, (live) => {
+      mark(live, ['a'])
+      endTurn(live)
+    })
+    const beforeSecond = applies.length
+    // Same id, different createdAt: the record is unrelated, so the first
+    // event folds the full prefix from init (the pre-seeding behavior).
+    const second = ctx.sessions.create(id, { meta: { createdAt: 8 }, seed: firstEvents })
+    expect(applies.slice(beforeSecond)).toEqual([])
+    mark(second, ['b'])
+    expect(applies.slice(beforeSecond)).toEqual([0, 1, 2, 3])
+    expect(ctx.sessionProjections.snapshot(second).values['cache-test/marks']).toEqual({ marks: ['b'] })
+  })
+
+  it('does not seed a row whose watermark claims past the live log end', async () => {
+    const { ctx, applies } = await recordingHarness()
+    const id = SessionId('seed-over')
+    const firstEvents = await writeRow(ctx, id, (live) => {
+      mark(live, ['a'])
+      mark(live, ['b'])
+      endTurn(live) // row lands at seq 2
+    })
+    const beforeSecond = applies.length
+    // A crash-repair truncation shrank the log below the row's watermark.
+    const second = ctx.sessions.create(id, { meta, seed: firstEvents.slice(0, 1) })
+    mark(second, ['c'])
+    expect(applies.slice(beforeSecond)).toEqual([0, 1, 2])
+    expect(ctx.sessionProjections.snapshot(second).values['cache-test/marks']).toEqual({ marks: ['c'] })
+  })
+
+  it('seeds usable rows directly and leaves every unusable case to the lazy fold', async () => {
+    const { ctx, applies } = await recordingHarness()
+    // Empty log: seeding returns before any unit work.
+    const empty = ctx.sessions.create(SessionId('seed-empty'), { meta })
+    ctx.sessionProjections.seedCheckpoint(empty, {
+      'cache-test/marks': { ver: 1, seq: 5, val: { marks: ['beyond'] } },
+    })
+    expect(applies).toEqual([])
+    expect(ctx.sessionProjections.snapshot(empty).values['cache-test/marks']).toEqual({ marks: [] })
+    // Non-empty session, seeded directly: the marker replays, then a repeat
+    // call is a no-op (cells exist), and version-mismatched or absent rows
+    // leave the cell unset for the lazy fold.
+    const seedEvent: SessionEvent<'cache-test/mark'> = {
+      type: 'cache-test/mark', seq: 0, time: 1, data: { marks: ['a'] },
+    }
+    const live = ctx.sessions.create(SessionId('seed-direct'), { meta, seed: [seedEvent] })
+    const rows = { 'cache-test/marks': { ver: 1, seq: 0, val: { marks: ['a'] } } }
+    ctx.sessionProjections.seedCheckpoint(live, rows)
+    expect(applies).toEqual([1]) // the end-seed marker only
+    ctx.sessionProjections.seedCheckpoint(live, rows)
+    ctx.sessionProjections.seedCheckpoint(live, {
+      'cache-test/marks': { ver: 999, seq: 0, val: { marks: ['stale'] } },
+    })
+    ctx.sessionProjections.seedCheckpoint(live, {})
+    expect(applies).toEqual([1])
+    expect(ctx.sessionProjections.snapshot(live).values['cache-test/marks']).toEqual({ marks: ['a'] })
+  })
+
+  it('contains a seeding failure: the session still announces and cells fold lazily', async () => {
+    const { ctx, pool, applies } = await recordingHarness()
+    ctx.sessionProjections.register({
+      key: 'cache-test/boom',
+      schema: z.object({ boom: z.boolean() }),
+      init: () => null,
+      apply: (state: 'poison' | null, _event: SessionEvent) => {
+        if (state === 'poison') throw new Error('poisoned projection state')
+        return state
+      },
+      view: () => ({ boom: false }),
+      stateVersion: 1,
+    })
+    const id = SessionId('seed-boom')
+    const firstEvents = await writeRow(ctx, id, (live) => {
+      mark(live, ['a'])
+      endTurn(live)
+    })
+    // Poison the boom unit's stored row: seeding replays it and throws.
+    const record = storedRecord(pool, id)
+    if (record === undefined) throw new Error('row was not written')
+    record.rows['cache-test/boom'] = { ver: 1, seq: 1, val: 'poison' }
+    const beforeSecond = applies.length
+    const second = ctx.sessions.create(id, { meta, seed: firstEvents })
+    expect(applies.slice(beforeSecond)).toEqual([2]) // marks seeded past the failure
+    // The creation was not vetoed: the read face serves (boom folds lazily).
+    expect(ctx.sessionProjections.snapshot(second).asOfSeq).toBe(2)
+    expect(ctx.sessionProjections.snapshot(second).values['cache-test/boom']).toEqual({ boom: false })
   })
 })

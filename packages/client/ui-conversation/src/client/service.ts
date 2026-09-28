@@ -71,8 +71,23 @@ function browserDraftAttachment(file: File): ComposerAttachment {
 interface ImageUrlEntry {
   readonly sessionId: SessionId
   readonly generation: number
-  readonly pending: Promise<string>
+  // Assigned right after construction resolves the read closure that closes
+  // over the entry itself, so it stays mutable (not readonly).
+  pending: Promise<string>
+  /** Mounted-image claims (one resolveImage call, one releaseImage call).
+   *  A resolved URL is never evicted while claims remain. */
+  retainCount: number
+  /** Resolved browser URL once the pending read settles; null beforehand. */
+  url: string | null
 }
+
+/**
+ * Resolved-but-unclaimed image URLs retained for cheap remounts (scrolling
+ * within the render window). Oldest leave first. Claimed (mounted) entries
+ * never count against the cap, so a visible image can never be revoked: in
+ * the worst case the cache temporarily runs larger while many images mount.
+ */
+const IMAGE_URL_CACHE_LIMIT = 64
 
 /** Unsupported browser-declared image type, localized by the UI boundary. */
 export class UnsupportedImageMediaTypeError extends Error {
@@ -206,21 +221,30 @@ export class ConversationController extends Service implements IConversation {
   }
 
   /**
-   * Resolve and cache one session-authorized historical image URL.
+   * Resolve and cache one session-authorized historical image URL. Each call
+   * adds one mount claim; the caller must pair it with {@link releaseImage}.
    * @param sessionId - owning session authorization scope.
    * @param attachment - durable image reference.
-   * @returns browser URL valid until its rendered session is released.
+   * @returns browser URL valid while claimed or retained by the bounded LRU.
    */
   resolveImage(sessionId: SessionId, attachment: ImageAttachmentRef): Promise<string> {
     if (this.disposed) return Promise.reject(new Error('conversation.resolveImage: service is disposed'))
     const key = `${sessionId}:${attachment.attachmentId}`
     const cached = this.imageUrls.get(key)
-    if (cached !== undefined) return cached.pending
+    if (cached !== undefined) {
+      cached.retainCount += 1
+      // Touch recency: Map iteration is insertion order, so re-insertion
+      // parks a re-mounted entry at the youngest end of the eviction walk.
+      this.imageUrls.delete(key)
+      this.imageUrls.set(key, cached)
+      return cached.pending
+    }
     const generation = this.imageGenerations.get(sessionId) ?? 0
     const session = this.requireSessions().binding(sessionId)?.session
     if (session === undefined) {
       return Promise.reject(new Error(`conversation.resolveImage: unknown session "${sessionId}"`))
     }
+    const entry: ImageUrlEntry = { sessionId, generation, pending: undefined as never, retainCount: 1, url: null }
     const pending = session.readAttachment(attachment.attachmentId)
       .then((result) => {
         if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
@@ -229,19 +253,50 @@ export class ConversationController extends Service implements IConversation {
           throw new Error('historical image scope was released before loading completed')
         }
         if (typeof URL.createObjectURL !== 'function') {
-          return `data:${result.value.attachment.mediaType};base64,${bytesToBase64(result.value.data)}`
+          entry.url = `data:${result.value.attachment.mediaType};base64,${bytesToBase64(result.value.data)}`
+          this.pruneImageUrls()
+          return entry.url
         }
         const bytes = Uint8Array.from(result.value.data)
         const url = URL.createObjectURL(new Blob([bytes.buffer], { type: result.value.attachment.mediaType }))
+        entry.url = url
         this.createdImageUrls.add(url)
+        this.pruneImageUrls()
         return url
       })
       .catch((error: unknown) => {
         if (this.imageUrls.get(key)?.generation === generation) this.imageUrls.delete(key)
         throw error
       })
-    this.imageUrls.set(key, { sessionId, generation, pending })
+    entry.pending = pending
+    this.imageUrls.set(key, entry)
     return pending
+  }
+
+  /**
+   * Drop one mount claim previously taken by {@link resolveImage}. Once an
+   * entry has no claims it becomes eligible for LRU eviction; a re-mount
+   * before eviction reuses the same URL, after eviction it re-resolves.
+   * @param sessionId - owning session authorization scope.
+   * @param attachment - durable image reference.
+   */
+  releaseImage(sessionId: SessionId, attachment: ImageAttachmentRef): void {
+    const entry = this.imageUrls.get(`${sessionId}:${attachment.attachmentId}`)
+    if (entry === undefined) return
+    entry.retainCount = Math.max(0, entry.retainCount - 1)
+    if (entry.retainCount === 0) this.pruneImageUrls()
+  }
+
+  /** Evict oldest resolved, unclaimed entries until the LRU is within cap. */
+  private pruneImageUrls(): void {
+    if (this.imageUrls.size <= IMAGE_URL_CACHE_LIMIT) return
+    for (const [key, entry] of this.imageUrls) {
+      if (this.imageUrls.size <= IMAGE_URL_CACHE_LIMIT) break
+      // Pending reads and mounted claims are never evicted.
+      if (entry.url === null || entry.retainCount > 0) continue
+      this.imageUrls.delete(key)
+      if (this.createdImageUrls.delete(entry.url)) revokePreview(entry.url)
+    }
   }
 
   /**
@@ -253,6 +308,10 @@ export class ConversationController extends Service implements IConversation {
     for (const [key, entry] of this.imageUrls) {
       if (entry.sessionId !== sessionId) continue
       this.imageUrls.delete(key)
+      if (entry.url !== null) {
+        if (this.createdImageUrls.delete(entry.url)) revokePreview(entry.url)
+        continue
+      }
       void entry.pending.then((url) => {
         if (!this.createdImageUrls.delete(url)) return
         revokePreview(url)

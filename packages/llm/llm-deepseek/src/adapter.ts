@@ -47,6 +47,12 @@ export interface DeepSeekCatalogModel {
  * makes a configuration change reach the next request without re-registration.
  */
 export interface DeepSeekConnectionOptions {
+  /**
+   * Whether the route serves requests. The adapter reads this only to keep its
+   * resolved facts complete; routing is decided by the registry, which holds
+   * no route for a disabled profile.
+   */
+  enabled: boolean
   /** Endpoint base; `/chat/completions` is appended. */
   baseURL: string
   /**

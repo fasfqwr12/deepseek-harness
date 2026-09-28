@@ -193,12 +193,50 @@
 
 /* Provider-row controls take the dense capsule (Button `.sm`). */
 .rowActions .secondaryButton,
-.rowActions .dangerButton {
+.rowActions .dangerButton,
+.rowActions .enabledToggle,
+.rowActions .disabledToggle {
   height: 28px;
   padding: 0 10px;
   border-radius: 14px;
   font-size: 12px;
   line-height: 18px;
+}
+
+/* The enabled switch reads as a status capsule rather than a command: filled
+   when on, outlined when off, so the row's own state is visible without
+   opening anything. */
+.enabledToggle,
+.disabledToggle {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.enabledToggle {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+}
+
+.disabledToggle {
+  border-color: var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.enabledToggle:hover:not(:disabled),
+.disabledToggle:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l3);
+}
+
+/* A disabled route stays legible but visibly out of service; only the row's
+   own title dims, so its state capsule and the Delete action keep contrast. */
+.rowCard[data-disabled] .rowName {
+  color: var(--dsw-alias-label-secondary);
 }
 
 .primaryButton:disabled,

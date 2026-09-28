@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { callConfigEquals, deepFreeze, isAgentLoopRequest, markAgentLoopRequest } from '../src/call-config.ts'
+import type { RetryOverride } from '../src/call-config.ts'
 import { ReasoningEffortId } from '../src/brand.ts'
 import type { GenerateOptions } from '../src/types.ts'
 
@@ -26,6 +27,27 @@ describe('callConfigEquals', () => {
     expect(callConfigEquals({ ...base, stop: ['a'] }, { ...base, stop: ['a', 'b'] })).toBe(false)
     expect(callConfigEquals({ ...base, stop: ['a'] }, { ...base, stop: ['b'] })).toBe(false)
     expect(callConfigEquals({ ...base, stop: ['a', 'b'] }, { ...base, stop: ['a', 'b'] })).toBe(true)
+    expect(callConfigEquals({ ...base, imageMode: 'dsh' }, base)).toBe(false)
+    expect(callConfigEquals({ ...base, imageMode: 'dsh' }, { ...base, imageMode: 'dsh' })).toBe(true)
+    expect(callConfigEquals({ ...base, searchMode: 'off' }, { ...base, searchMode: 'native' })).toBe(false)
+  })
+
+  it('compares the retry override field-wise in both of its forms', () => {
+    const base = { provider: 'p', model: 'm' }
+    const policy = { maxRetries: 20, initialDelayMs: 2_000 }
+    const withPolicy = (retryOverride: RetryOverride) => ({ ...base, retryOverride })
+    // The object form is rebuilt per request, so distinct instances of one
+    // policy must not read as a change: that verdict logs a header snapshot
+    // on every step and is what bloats a session log.
+    expect(callConfigEquals(withPolicy({ ...policy }), withPolicy({ ...policy }))).toBe(true)
+    expect(callConfigEquals(withPolicy(policy), withPolicy(policy))).toBe(true)
+    expect(callConfigEquals(withPolicy('off'), withPolicy('off'))).toBe(true)
+    expect(callConfigEquals(withPolicy({ maxRetries: 20 }), withPolicy({ maxRetries: 20, initialDelayMs: 2_000 }))).toBe(false)
+    expect(callConfigEquals(withPolicy({ maxRetries: 20 }), withPolicy({ maxRetries: 3 }))).toBe(false)
+    expect(callConfigEquals(withPolicy(policy), withPolicy({ maxRetries: 20, initialDelayMs: 5 }))).toBe(false)
+    expect(callConfigEquals(withPolicy('off'), withPolicy({ maxRetries: 20 }))).toBe(false)
+    expect(callConfigEquals(withPolicy('off'), base)).toBe(false)
+    expect(callConfigEquals(base, base)).toBe(true)
   })
 })
 

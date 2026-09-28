@@ -612,12 +612,20 @@ function LegacySessionMaybeEntry({ info, ...rest }: SessionMaybeEntryProps & { i
 }
 
 /**
- * Retained-session budget beside the live body: 1 live + 4 retained mounts.
+ * Retained-session budget beside the live body: 1 live + 2 retained mounts.
  * Bounds DOM and subscription cost of keep-alive while covering the recent
- * working set of a typical switch pattern (previous + next conversation,
- * plus the middle sessions of fast multi-session triage).
+ * working set of a typical switch pattern (previous + next conversation).
+ *
+ * Back to 2 from the 4 tried on 2026-09-08: every retained body stays mounted
+ * in the SAME document (`data-keepalive`, display:none), so widening the pool
+ * multiplies the copies of chat DOM that any document-wide query can hit.
+ * Plugin code that locates chat rows or composers by `document.querySelector`
+ * then resolves rows of a DIFFERENT conversation (per-session ids like `seq`
+ * collide across sessions), which surfaces as "scrolling up shows another
+ * conversation". Correctness of that contract outranks the extra retained
+ * bodies; scope plugin queries to the visible body before widening again.
  */
-const KEEP_ALIVE_RETAINED = 4
+const KEEP_ALIVE_RETAINED = 2
 
 /** One mounted session-maybe body: stable React key + the session it renders. */
 interface KeepAliveSlot {

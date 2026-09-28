@@ -9,7 +9,9 @@ import {
 import type {
   BusyEnterBehavior, ComposerSubmitGesture, InputSubmitMode,
 } from '../contract/composer-submission.ts'
-import { BUSY_ENTER_FIELD, DEFAULT_BUSY_ENTER_BEHAVIOR } from '../../submission-settings.ts'
+import {
+  BUSY_ENTER_FIELD, DEFAULT_BUSY_ENTER_BEHAVIOR, DEFAULT_THINK_COLLAPSED, THINK_COLLAPSED_FIELD,
+} from '../../submission-settings.ts'
 import type { ConversationSettings } from '../../submission-settings.ts'
 
 export { DEFAULT_BUSY_ENTER_BEHAVIOR } from '../../submission-settings.ts'
@@ -22,6 +24,8 @@ export { DEFAULT_BUSY_ENTER_BEHAVIOR } from '../../submission-settings.ts'
 export class ComposerSubmissionPolicy {
   /** Reactive preference source for the Settings row. */
   readonly busyEnter: SnapshotStore<BusyEnterBehavior> = createSnapshotStore(DEFAULT_BUSY_ENTER_BEHAVIOR)
+  /** Reactive preference source: whether Think rows start collapsed. */
+  readonly thinkCollapsed: SnapshotStore<boolean> = createSnapshotStore(DEFAULT_THINK_COLLAPSED)
   private readonly host: SettingsScope<ConversationSettings> | undefined
 
   /**
@@ -68,12 +72,30 @@ export class ComposerSubmissionPolicy {
   }
 
   /**
+   * Change whether Think rows start collapsed; the live value publishes before
+   * the durable write starts.
+   * @param collapsed - start collapsed instead of following the stream.
+   */
+  setThinkCollapsed(collapsed: boolean): void {
+    if (this.thinkCollapsed.getSnapshot() === collapsed) return
+    this.thinkCollapsed.set(collapsed)
+    void this.host?.set(THINK_COLLAPSED_FIELD, collapsed)
+  }
+
+  /**
    * Adopt the scope's accepted durable behavior without writing it back.
    * @param host - the constructor-narrowed scope driving this adoption.
    */
   private adopt(host: SettingsScope<ConversationSettings>): void {
     const section = host.getSnapshot().value
-    if (section === undefined || this.busyEnter.getSnapshot() === section.busyEnter) return
-    this.busyEnter.set(section.busyEnter)
+    if (section === undefined) return
+    if (this.busyEnter.getSnapshot() !== section.busyEnter) this.busyEnter.set(section.busyEnter)
+    // The browser bundle reloads without restarting the Host process, so a
+    // Host whose registered schema predates this field resolves no value for
+    // it; keep the local default instead of adopting `undefined`.
+    if (typeof section.thinkCollapsed === 'boolean'
+      && this.thinkCollapsed.getSnapshot() !== section.thinkCollapsed) {
+      this.thinkCollapsed.set(section.thinkCollapsed)
+    }
   }
 }

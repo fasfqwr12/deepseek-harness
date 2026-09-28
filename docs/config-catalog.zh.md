@@ -389,6 +389,24 @@ export type Config = LocalConfig
 
 来源：[`packages/shell/bash-sandbox/src/index.ts:35`](../packages/shell/bash-sandbox/src/index.ts)
 
+<a id="deepseek-aidsh-client-client-errors"></a>
+
+## `@deepseek-ai/dsh-client-client-errors`
+
+需要：`webServer`
+
+```ts config-catalog
+/** Plugin config, validated by the same-named schemastery schema. */
+export interface Config {
+  /** Request-body byte cap; a larger body is answered 413 without being parsed. */
+  maxBodyBytes?: number
+  /** Accepted reports per minute; further reports in the window are dropped. */
+  reportsPerMinute?: number
+}
+```
+
+来源：[`packages/client/client-errors/src/index.ts:48`](../packages/client/client-errors/src/index.ts)
+
 <a id="deepseek-aidsh-client-connection"></a>
 
 ## `@deepseek-ai/dsh-client-connection`
@@ -486,7 +504,7 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
 export interface CompactionPolicyConfig {
   /** Compact at this fraction of the model's context window. Defaults to `0.8`. */
   thresholdRatio?: number
-  /** Recent context retained as a fraction of the model's window. Defaults to `0.16`. */
+  /** Recent context retained as a fraction of the model's window. Defaults to `0.25`. */
   retainRatio?: number
   /** Absolute recent-context budget; mutually exclusive with `retainRatio`. */
   retainTokens?: number
@@ -858,10 +876,10 @@ export interface Config {
   apiKeyEnv?: string
   /** Endpoint base; falls back to $DEEPSEEK_BASE_URL from a trusted environment layer, then the public API. */
   baseURL?: string
-  /** Deployment thinking policy; `disabled` limits every conversation request to `off`. */
+  /** Automatic-mode thinking fallback; an explicit request effort takes precedence. */
   thinking?: 'enabled' | 'disabled'
   /** Default thinking effort (default `high`); `off` disables thinking per request. */
-  reasoningEffort?: 'off' | 'high' | 'max'
+  reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
   /** Default per-request output cap (default 256,000); a model's own cap and explicit request values win. */
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value (default 1,000,000). */
@@ -972,7 +990,7 @@ export interface PiAiProviderProfile {
   /** Provider request headers; Harness attribution wins reserved names. */
   headers?: Record<string, string>
   /** Provider-neutral pi-ai reasoning level. */
-  reasoning?: ModelThinkingLevel
+  reasoning?: PiAiThinkingLevel
   /** Token budgets used by reasoning providers that support them. */
   thinkingBudgets?: ThinkingBudgets
   /** Prompt-cache retention preference. */
@@ -1056,6 +1074,9 @@ export interface PiAiCompatProfile {
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
 
+/** Harness reasoning levels accepted by this adapter, including the gateway-only Ultra extension. */
+export type PiAiThinkingLevel = ModelThinkingLevel | 'ultra'
+
 /**
  * Selectable reasoning efforts for one model: each key is a level the model
  * offers (and selectors show), and its value is the wire spelling dispatch
@@ -1064,7 +1085,7 @@ export type PiAiModality = Model<Api>['input'][number]
  * absence; every other declared level must name a wire value. A level absent
  * from the dict is not offered.
  */
-export type PiAiReasoningEfforts = Partial<Record<ModelThinkingLevel, string | null>>
+export type PiAiReasoningEfforts = Partial<Record<PiAiThinkingLevel, string | null>>
 
 /** One reasoning-dispatch wire format a profile may name. */
 export type PiAiThinkingFormat = Exclude<PiThinkingFormat, WithheldThinkingFormat>
@@ -2844,6 +2865,38 @@ export type ApprovalPolicy = 'ask' | 'never'
 ```
 
 来源：[`packages/interaction/user-approval/src/index.ts:177`](../packages/interaction/user-approval/src/index.ts)
+
+<a id="deepseek-aidsh-vision-bridge"></a>
+
+## `@deepseek-ai/dsh-vision-bridge`
+
+需要：`tools` · `fs` · `credentials`
+
+```ts config-catalog
+/** Plugin configuration. Every credential defaults to an environment variable. */
+export interface Config {
+  /** OpenAI-compatible chat-completions base URL. Defaults to `VISION_BASE_URL`. */
+  baseURL?: string
+  /** Bearer API key. Defaults to the variable named by `apiKeyEnv`. */
+  apiKey?: string
+  /** Environment variable that holds the API key. Defaults to `VISION_API_KEY`. */
+  apiKeyEnv?: string
+  /** Vision model id. Defaults to `VISION_MODEL`. */
+  model?: string
+  /** Environment variable that holds the model id. Defaults to `VISION_MODEL`. */
+  modelEnv?: string
+  /** Per-request abort timeout in milliseconds. */
+  timeoutMs?: number
+  /** Default free-form description prompt. */
+  describePrompt?: string
+  /** Prompt used when OCR is requested. */
+  ocrPrompt?: string
+  /** Maximum image bytes forwarded to the vision endpoint. */
+  maxBytes?: number
+}
+```
+
+来源：[`packages/llm/vision-bridge/src/index.ts:24`](../packages/llm/vision-bridge/src/index.ts)
 
 <a id="deepseek-aidsh-web"></a>
 

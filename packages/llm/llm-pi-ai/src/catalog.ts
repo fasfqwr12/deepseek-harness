@@ -199,6 +199,14 @@ export interface PiAiCompatProfile {
   thinkingFormat?: PiAiThinkingFormat
   /** Whether the endpoint accepts `reasoning_effort`; absent keeps the catalog entry's, then pi-ai's baseURL-derived guess. */
   supportsReasoningEffort?: boolean
+  /**
+   * Whether the endpoint accepts the OpenAI `developer` message role.
+   * pi-ai's baseURL-derived guess assumes yes for every URL it does not
+   * recognize, but strict gateways (new-api relaying a model that only knows
+   * `system`) reject the role outright, so a declared reasoning model's
+   * system prompt must stay a `system` message there.
+   */
+  supportsDeveloperRole?: boolean
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -402,11 +410,13 @@ function resolveModelCompat(
 ): { compat: OpenAICompletionsCompat } | Record<string, never> {
   const thinkingFormat = entry.compat?.thinkingFormat ?? route?.thinkingFormat
   const supportsReasoningEffort = entry.compat?.supportsReasoningEffort ?? route?.supportsReasoningEffort
-  if (thinkingFormat === undefined && supportsReasoningEffort === undefined) return {}
+  const supportsDeveloperRole = entry.compat?.supportsDeveloperRole ?? route?.supportsDeveloperRole
+  if (thinkingFormat === undefined && supportsReasoningEffort === undefined && supportsDeveloperRole === undefined) return {}
   if (api !== 'openai-completions') {
-    if (entry.compat?.thinkingFormat !== undefined || entry.compat?.supportsReasoningEffort !== undefined) {
+    if (entry.compat?.thinkingFormat !== undefined || entry.compat?.supportsReasoningEffort !== undefined
+      || entry.compat?.supportsDeveloperRole !== undefined) {
       invalid(provider, `model "${entry.id}" sets compat reasoning switches, but its api is "${api}";`
-        + ' thinkingFormat and supportsReasoningEffort exist only on openai-completions')
+        + ' thinkingFormat, supportsReasoningEffort, and supportsDeveloperRole exist only on openai-completions')
     }
     return {}
   }
@@ -422,6 +432,7 @@ function resolveModelCompat(
       ...inherited,
       ...thinkingFormat === undefined ? {} : { thinkingFormat },
       ...supportsReasoningEffort === undefined ? {} : { supportsReasoningEffort },
+      ...supportsDeveloperRole === undefined ? {} : { supportsDeveloperRole },
     },
   }
 }
@@ -495,6 +506,7 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
   const routeApi = sharedCatalogApi(defaults)
   const routeCompatDefined = request.compat?.thinkingFormat !== undefined
     || request.compat?.supportsReasoningEffort !== undefined
+    || request.compat?.supportsDeveloperRole !== undefined
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
   const models = entries.map((entry) => {
@@ -548,7 +560,7 @@ export function resolveRouteModels(request: RouteCatalogRequest): RouteCatalog {
   })
   if (routeCompatDefined && !models.some(model => model.api === 'openai-completions')) {
     invalid(provider, 'sets compat reasoning switches, but no model on the route speaks openai-completions;'
-      + ' thinkingFormat and supportsReasoningEffort exist only on that protocol')
+      + ' thinkingFormat, supportsReasoningEffort, and supportsDeveloperRole exist only on that protocol')
   }
   return { models, configuredMaxTokens }
 }

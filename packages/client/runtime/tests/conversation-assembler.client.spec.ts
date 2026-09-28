@@ -1045,3 +1045,81 @@ describe('ConversationNodeAssembler', () => {
     expect([...chatSnapshot(assembler)?.nodes.values() ?? []][0]?.data).toBe(1)
   })
 })
+
+describe('evictionBoundary', () => {
+  /**
+   * A Context per `commandId`, started by `command/run` and extended by every
+   * later `command/done` for that id — so a Context spans from its start seq to
+   * its last update seq, and only a cut outside that span keeps it whole.
+   */
+  function assemblerWith(events: readonly SessionEvent[]): ConversationNodeAssembler {
+    const definition: ConversationNodeDefinition<number> = {
+      kind: 'span',
+      match: (event) => {
+        const commandId = (event.data as unknown as { commandId: string }).commandId
+        if ((event.type as string) === 'command/run') return { id: commandId, role: 'start' }
+        if ((event.type as string) === 'command/done') return { id: commandId, role: 'update' }
+        return null
+      },
+      start: (_context, match) => match.event.seq,
+      update: context => context.state,
+      target: 'chat',
+      buildViewNode: context => node(context, context.state),
+    }
+    const assembler = new ConversationNodeAssembler(
+      new TestEventDefinitions([definition]),
+      new TestViewDefinitions([testView()]),
+    )
+    assembler.replaceWindow(events.map(input), false)
+    assembler.flush()
+    return assembler
+  }
+
+  /** Commands "one" (seq 1-3) and "two" (seq 4-5): two Contexts with distinct spans. */
+  function twoSpans(): ConversationNodeAssembler {
+    return assemblerWith([
+      at(1, 'command/run', { commandId: 'one', name: 'x' }),
+      at(2, 'command/done', { commandId: 'one', kind: 'success' }),
+      at(3, 'command/done', { commandId: 'one', kind: 'success' }),
+      at(4, 'command/run', { commandId: 'two', name: 'x' }),
+      at(5, 'command/done', { commandId: 'two', kind: 'success' }),
+    ])
+  }
+
+  it('returns null for an empty window (nothing to evict)', () => {
+    expect(assemblerWith([]).evictionBoundary(10)).toBeNull()
+  })
+
+  it('pulls a cut inside a Context down to that Context start', () => {
+    // A cut at 3 would drop "one"'s start while keeping its update, leaving a
+    // start-less Context that accumulates without ever rendering.
+    expect(twoSpans().evictionBoundary(3)).toBe(1)
+  })
+
+  it('clamps a cut below the oldest resident event up to that event', () => {
+    // Nothing older than seq 1 is resident, so the boundary cannot go below it.
+    expect(twoSpans().evictionBoundary(0)).toBe(1)
+  })
+
+  it('keeps a cut that falls on a Context start', () => {
+    // seq 4 is "two"'s start, so cutting there drops "one" whole and keeps "two" whole.
+    expect(twoSpans().evictionBoundary(4)).toBe(4)
+  })
+
+  it('pulls a cut past a Context start back to it rather than orphaning the Context', () => {
+    // seq 5 is inside "two" (start 4), so the boundary returns to 4, not 5.
+    expect(twoSpans().evictionBoundary(5)).toBe(4)
+  })
+
+  it('resolves chained pull-backs down to the earliest affected start', () => {
+    // Two Contexts that interleave: cutting inside the later one pulls to its
+    // start, which lands inside the earlier one and pulls again.
+    const assembler = assemblerWith([
+      at(1, 'command/run', { commandId: 'one', name: 'x' }),
+      at(2, 'command/run', { commandId: 'two', name: 'x' }),
+      at(3, 'command/done', { commandId: 'two', kind: 'success' }),
+      at(4, 'command/done', { commandId: 'one', kind: 'success' }),
+    ])
+    expect(assembler.evictionBoundary(4)).toBe(1)
+  })
+})

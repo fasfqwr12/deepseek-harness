@@ -107,11 +107,25 @@ function validatePwshArgs(args: PwshToolArgs): void {
 const READ_ONLY_PWSH_COMMANDS: ReadonlySet<string> = new Set([
   'Get-Location',
   'Get-ChildItem',
+  'Get-ChildItem -File',
+  'Get-ChildItem -Force',
   'git status',
   'git status --short',
+  'git status --porcelain',
   'git branch',
+  'git branch --show-current',
+  'git log --oneline -1',
+  'git log --oneline -3',
+  'git log --oneline -5',
+  'git log --oneline -8',
   'git log --oneline -20',
   'git diff --stat',
+  'git diff --stat HEAD',
+  'git diff --name-only',
+  'git rev-parse HEAD',
+  'git rev-parse --abbrev-ref HEAD',
+  'git describe --tags --abbrev=0',
+  'git tag --list',
 ])
 
 /**
@@ -274,7 +288,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.systemPrompt.section({
     name: 'tool:pwsh',
     order: 105,
-    text: 'Issue independent read/search/fetch calls together in one response. Shell calls overlap only when the host classifies their exact command as safe; never claim a command is parallel-safe yourself. The host already classifies these fixed read-only probes as safe and overlaps them: `Get-Location`, `Get-ChildItem`, `git status`, `git status --short`, `git branch`, `git log --oneline -20`, `git diff --stat` — issue them together in one response when independent. Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. '
+    text: 'Issue independent read/search/fetch calls together in one response. Shell calls overlap only when the host classifies their exact command as safe; never claim a command is parallel-safe yourself. The host already classifies these fixed read-only probes as safe and overlaps them: `Get-Location`, `Get-ChildItem` (+`-File`/`-Force`), `git status` (+`--short`/`--porcelain`), `git branch` (+`--show-current`), `git log --oneline -1|-3|-5|-8|-20`, `git diff --stat` (+`HEAD`), `git diff --name-only`, `git rev-parse HEAD` (+`--abbrev-ref HEAD`), `git describe --tags --abbrev=0`, `git tag --list` — issue them together in one response when independent. Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. '
       + 'On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure.',
   })
 

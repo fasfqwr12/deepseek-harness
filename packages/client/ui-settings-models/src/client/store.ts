@@ -31,6 +31,13 @@ export interface ProviderRow {
   apiKeyEnv: string | undefined
   /** Credential state for {@link apiKeyEnv}, once described. */
   credential: CredentialView | undefined
+  /**
+   * Whether this route's profile resolves enabled. Absent configuration means
+   * enabled, matching the schema default: a route is on unless someone
+   * switched it off. Undefined when the row is unconfigured or its namespace
+   * did not load — the toggle then renders disabled rather than guessing.
+   */
+  enabled: boolean | undefined
 }
 
 /** Page snapshot. */
@@ -95,6 +102,23 @@ function apiKeyEnvOf(namespace: SettingsNamespaceView | undefined, path: readonl
   return typeof ref === 'string' && ref.length > 0 ? ref : undefined
 }
 
+/**
+ * Whether a resolved profile declares itself enabled (its `enabled` field).
+ * An absent field is enabled — the adapter schema's own default — so this reads
+ * the resolved section, not the raw user layer: a provider switched off in the
+ * composition base must not show as on just because the user layer is silent.
+ * @param namespace - the namespace view holding the resolved section.
+ * @param path - path from the section root to this provider's profile.
+ * @returns the resolved flag, or undefined when the profile is not configured.
+ */
+function enabledOf(namespace: SettingsNamespaceView | undefined, path: readonly string[]): boolean | undefined {
+  if (namespace === undefined) return undefined
+  const profile = getPath(namespace.value, path)
+  if (typeof profile !== 'object' || profile === null) return undefined
+  const enabled = (profile as { enabled?: unknown }).enabled
+  return typeof enabled === 'boolean' ? enabled : true
+}
+
 /** The models settings page controller (one per settings surface). */
 export class ModelsSettingsStore {
   /** The snapshot the section renders from (uSES-safe store). */
@@ -155,6 +179,7 @@ export class ModelsSettingsStore {
         removable,
         apiKeyEnv: apiKeyEnvOf(namespace, entry.settingsPath),
         credential: undefined,
+        enabled: enabledOf(namespace, entry.settingsPath),
       }
     })
     const refs = [...new Set(rows.flatMap(row => row.apiKeyEnv === undefined ? [] : [row.apiKeyEnv]))]

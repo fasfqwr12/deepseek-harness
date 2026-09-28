@@ -59,12 +59,28 @@ export interface LlmCallConfigAdapterDefaults {
 }
 
 /**
+ * Field-wise equality over the two {@link RetryOverride} forms. The object form
+ * is rebuilt for every request, so comparing it by identity would report a
+ * change on every step; only the primitives may compare by value directly.
+ * @param a - one override.
+ * @param b - the other.
+ * @returns whether both name the same retry policy.
+ */
+function retryOverrideEquals(a: RetryOverride | undefined, b: RetryOverride | undefined): boolean {
+  if (typeof a === 'object' && typeof b === 'object') {
+    return a.maxRetries === b.maxRetries && a.initialDelayMs === b.initialDelayMs
+  }
+  return a === b
+}
+
+/**
  * Field-wise equality over {@link LlmCallConfig} — the comparison a caller
  * runs to decide whether a proposed configuration is a real change (worth a
  * logged header snapshot) or the held one restated.
  * @param a - one configuration.
  * @param b - the other.
- * @returns whether every field (including the `stop` list, element-wise) matches.
+ * @returns whether every field (including the `stop` list and the `retryOverride`
+ * object, element-wise) matches.
  */
 export function callConfigEquals(a: LlmCallConfig, b: LlmCallConfig): boolean {
   if (
@@ -74,7 +90,7 @@ export function callConfigEquals(a: LlmCallConfig, b: LlmCallConfig): boolean {
     || a.temperature !== b.temperature
     || a.maxTokens !== b.maxTokens
   ) return false
-  if (a.retryOverride !== b.retryOverride) return false
+  if (!retryOverrideEquals(a.retryOverride, b.retryOverride)) return false
   if (a.imageMode !== b.imageMode || a.searchMode !== b.searchMode) return false
   if (a.stop === undefined || b.stop === undefined) return a.stop === b.stop
   return a.stop.length === b.stop.length && a.stop.every((s, i) => s === b.stop?.[i])

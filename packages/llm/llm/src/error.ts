@@ -100,6 +100,60 @@ export function isQuotaExceededError(detail: string): boolean {
 }
 
 /**
+ * Reset horizon beyond which a rate limit is treated as a quota: waiting out
+ * the reset inside one request's retry loop cannot plausibly succeed, so the
+ * failure is terminal for this turn.
+ */
+export const RATE_LIMIT_QUOTA_HORIZON_MS = 60_000
+
+/** Absolute datetime (`YYYY-MM-DD HH:MM[:SS]` spelling; the timezone suffix is matched separately). */
+const ABSOLUTE_RESET = /(\d{4}-\d{2}-\d{2})[\s_T]+(\d{2}:\d{2}(?::\d{2})?)/
+
+/** Zone suffixes that follow the timestamp in provider prose (`UTC+8`, `GMT+08:00`, bare `+08:00`). */
+const ZONE_SUFFIX = /\b(?:UTC|GMT)\s*([+-])(\d{1,2})(?::(\d{2}))?\b|\b([+-])(\d{2}):?(\d{2})\b(?=\s*(?:重置|reset)|$)/i
+
+/** Relative horizons: English `in|after <n> <unit>` and Chinese `<n><unit>后`, each with an explicit unit. */
+const RELATIVE_RESET =
+  /\b(?:in|after)\s+(\d+(?:\.\d+)?)\s*(h|hr|hour|hours|minute|minutes|min|second|seconds|s|m)\b|(\d+(?:\.\d+)?)\s*(小时|分钟|秒)后/i
+
+/**
+ * Recognize a rate-limit message that announces a reset point too far in the
+ * future to wait out inside a retry loop. Chinese gateways phrase the quota
+ * wall as a reset timestamp (`…将于 2026-09-24 15:25:52 UTC+8 重置`); the same
+ * contract appears in English as `resets in 5 minutes`. A horizon within
+ * {@link RATE_LIMIT_QUOTA_HORIZON_MS} stays a transient RATE_LIMIT; beyond it
+ * the message is quota semantics — retrying until exhaustion only burns
+ * minutes.
+ * @param detail - provider error code/type/message text joined into one string.
+ * @param now - reference clock for horizon arithmetic (defaults to the real clock).
+ * @returns true when the message carries a reset horizon beyond the quota threshold.
+ */
+export function isFarFutureRateLimitReset(detail: string, now: number = Date.now()): boolean {
+  const absolute = ABSOLUTE_RESET.exec(detail)
+  if (absolute !== null) {
+    const zone = ZONE_SUFFIX.exec(detail)
+    const offsetMinutes = zone === null ? 0
+      : (zone[1] ?? zone[4]) === '-' ? -1
+        : 1 * (Number(zone[2] ?? zone[5]) * 60 + Number(zone[3] ?? zone[6] ?? 0))
+    const parsed = Date.parse(`${absolute[1]}T${absolute[2]}${offsetMinutes === 0 ? 'Z' : `${offsetMinutes >= 0 ? '+' : '-'}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0')}:${String(Math.abs(offsetMinutes) % 60).padStart(2, '0')}`}`)
+    if (!Number.isNaN(parsed)) return parsed - now > RATE_LIMIT_QUOTA_HORIZON_MS
+  }
+  const relative = RELATIVE_RESET.exec(detail)
+  if (relative !== null) {
+    // English branch captures (value, unit); the Chinese branch captures
+    // (value, unit) with its own unit group at index 4.
+    const value = Number(relative[1] ?? relative[3])
+    const unit = relative[2] ?? relative[4]
+    if (Number.isFinite(value) && value > 0 && unit !== undefined) {
+      const unitMs = /^(?:h|hr|hour|hours|小时)$/i.test(unit) ? 3_600_000
+        : /^(?:m|minute|minutes|分钟)$/i.test(unit) ? 60_000 : 1_000
+      return value * unitMs > RATE_LIMIT_QUOTA_HORIZON_MS
+    }
+  }
+  return false
+}
+
+/**
  * Render a thrown value with its full `cause` chain and AggregateError
  * members, so transport wrappers like undici's `TypeError: fetch failed`
  * surface the underlying failure instead of masking it. Plain structured

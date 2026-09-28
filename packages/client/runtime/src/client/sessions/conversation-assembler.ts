@@ -248,6 +248,47 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
   }
 
   /**
+   * Lowest resident sequence that can be kept while leaving every surviving
+   * Context publishable.
+   *
+   * A Context publishes a Node only once its start Match has arrived, so a cut
+   * that dropped a start while keeping a later Match would leave a start-less
+   * Context that accumulates forever without ever rendering. A Context straddles
+   * the cut when its `startSeq` is below it while its last Match is at or above
+   * it (Matches are strictly seq-ascending, so the last is the highest), and each
+   * straddling Context pulls the boundary down to its own `startSeq`. The scan
+   * repeats because that pull can bring the cut into an earlier Context's span.
+   * It terminates because `candidate` only ever decreases, is bounded below by
+   * the oldest resident sequence, and each pull sets it to a `startSeq` that then
+   * satisfies `startSeq >= candidate` for that Context.
+   * @param cutSeq - the caller's preferred cut, from its own event or size budget.
+   * @returns the largest Context-safe boundary at or below `cutSeq`, or null when the window is empty.
+   */
+  evictionBoundary(cutSeq: number): number | null {
+    let oldest: number | null = null
+    for (const seq of this.inputs.keys()) {
+      if (oldest === null || seq < oldest) oldest = seq
+    }
+    if (oldest === null) return null
+    let candidate = Math.max(oldest, cutSeq)
+    let moved = true
+    while (moved) {
+      moved = false
+      for (const context of this.contexts.values()) {
+        const startSeq = context.startSeq
+        if (startSeq === undefined || startSeq >= candidate) continue
+        const last = context.matches[context.matches.length - 1]
+        // Fully above the cut (start kept) or fully below it (dropped whole):
+        // either way no start is orphaned.
+        if (last === undefined || last.event.seq < candidate) continue
+        candidate = startSeq
+        moved = true
+      }
+    }
+    return candidate
+  }
+
+  /**
    * Rebuild against the current Registry set after a low-frequency plugin change.
    * @returns immediate publication request.
    */

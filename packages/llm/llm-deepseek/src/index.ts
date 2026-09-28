@@ -60,6 +60,12 @@ const DEFAULT_MODELS: DeepSeekCatalogModel[] = [
  * reasoning effort resolves to `high`.
  */
 export interface Config {
+  /**
+   * Whether this route serves requests. A disabled route keeps every other
+   * field — its key, endpoint, and catalog are untouched — but registers
+   * nothing, so it leaves every model selector while staying editable here.
+   */
+  enabled?: boolean
   /** Credential reference (environment-variable name) resolved per request; defaults to `DEEPSEEK_API_KEY`. */
   apiKeyEnv?: string
   /** Endpoint base; falls back to $DEEPSEEK_BASE_URL from a trusted environment layer, then the public API. */
@@ -89,6 +95,7 @@ const catalogModel: z<DeepSeekCatalogModel> = z.object({
 })
 
 export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(true),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   baseURL: z.string(),
   thinking: z.union(['enabled', 'disabled']),
@@ -176,6 +183,7 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
     )
   }
   return {
+    enabled: config.enabled ?? true,
     apiKeyEnv: credentialRef(config.apiKeyEnv ?? DEFAULT_API_KEY_ENV),
     baseURL: config.baseURL
       ?? environment?.get(BASE_URL_ENV)?.value
@@ -248,18 +256,25 @@ export function apply(ctx: Context, config: Config): void {
   ])
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below.
+  // The profile carries no route to drop here (one fixed route), so a disabled
+  // section registers the empty set instead of skipping registration: the
+  // handle must exist for a later re-enable to replace.
   const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
   let registeredPolicy = options().retryPolicy
+  let registeredEnabled = options().enabled
   const ensureRegistrationFacts = (): void => {
-    const policy = options().retryPolicy
-    if (deepEqualJson(policy, registeredPolicy)) return
-    // The registry captures the retry policy at registration, so it is the one
-    // fact per-request resolution cannot refresh. `replace` re-reads it in one
-    // synchronous registry section: disposing and re-registering instead would
-    // publish an empty route set between the two, and an observer that reacted
-    // to it would see this provider disappear and come back.
-    registration.replace([PROVIDER])
-    registeredPolicy = policy
+    const resolved = options()
+    if (deepEqualJson(resolved.retryPolicy, registeredPolicy)
+      && resolved.enabled === registeredEnabled) return
+    // The registry captures the retry policy and route set at registration, so
+    // those are the facts per-request resolution cannot refresh. `replace`
+    // re-reads them in one synchronous registry section: disposing and
+    // re-registering instead would publish an empty route set between the two,
+    // and an observer that reacted to it would see this provider disappear and
+    // come back.
+    registration.replace(resolved.enabled ? [PROVIDER] : [])
+    registeredPolicy = resolved.retryPolicy
+    registeredEnabled = resolved.enabled
   }
 
   installSettingsSection(ctx, NS, Config, config, {

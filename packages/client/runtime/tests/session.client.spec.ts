@@ -445,6 +445,78 @@ describe('paging', () => {
   })
 })
 
+describe('resident window bound', () => {
+  /** One live event whose serialized size is roughly `chars` (payload, not node overhead). */
+  function bulky(seq: number, chars: number): SessionEvent {
+    return ev.chunkText(seq, 1, 'x'.repeat(chars))
+  }
+
+  /** Feed `count` live events, keeping only the newest seqs the budget must retain. */
+  function feedLive(session: Session, events: readonly SessionEvent[]): void {
+    for (const event of events) {
+      session.handleMuxEnvelope('r' as never, { type: 'session/event', sessionId: SID, event } as never)
+    }
+  }
+
+  it('evicts the oldest resident events once the size budget is exceeded', () => {
+    const { api, session } = makeSession()
+    // Each event serializes to ~64KB, so RESIDENT_SIZE_BUDGET (32MB) is crossed
+    // well before 20k events — the size budget, not the event budget, drives this.
+    const chars = 64 * 1024
+    const page = [ev.turnStart(1, 1), ev.user(2, '问')]
+    api.onHistory = () => histResponse(page, true)
+
+    return session.open().then(() => {
+      const events: SessionEvent[] = [bulky(3, chars), bulky(4, chars)]
+      for (let seq = 5; seq < 600; seq++) events.push(bulky(seq, chars))
+      feedLive(session, events)
+      const snapshot = session.getSnapshot()
+      // The retained window is bounded, so the oldest turn is now paged-out history.
+      expect(snapshot.hasMore).toBe(true)
+      expect(chatSeqs(snapshot)).not.toContain(2)
+    })
+  })
+
+  it('keeps the newest events resident after an eviction pass', async () => {
+    const { api, session } = makeSession()
+    const chars = 64 * 1024
+    api.onHistory = () => histResponse([ev.turnStart(1, 1)], true)
+    await session.open()
+    const events: SessionEvent[] = []
+    for (let seq = 2; seq < 600; seq++) events.push(bulky(seq, chars))
+    feedLive(session, events)
+    // The live tip always survives: a running turn is never evicted.
+    const last = events[events.length - 1]
+    expect(last).toBeDefined()
+    const snapshot = session.getSnapshot()
+    expect(chatSeqs(snapshot)).toContain((last as SessionEvent).seq)
+  })
+
+  it('raises hasMore rather than losing evicted history', async () => {
+    const { api, session } = makeSession()
+    const chars = 64 * 1024
+    api.onHistory = () => histResponse([ev.turnStart(1, 1), ev.user(2, '问')], false)
+    await session.open()
+    expect(session.getSnapshot().hasMore).toBe(false)
+    const events: SessionEvent[] = []
+    for (let seq = 3; seq < 600; seq++) events.push(bulky(seq, chars))
+    feedLive(session, events)
+    // Evicted events remain fetchable: the window reports older history again.
+    expect(session.getSnapshot().hasMore).toBe(true)
+  })
+
+  it('never evicts for a window that stays inside both budgets', async () => {
+    const { api, session } = makeSession()
+    api.onHistory = () => histResponse(plainTurn(0, 1, '问', '答'), false)
+    await session.open()
+    feedLive(session, plainTurn(6, 2, '问', '答'))
+    const snapshot = session.getSnapshot()
+    expect(snapshot.hasMore).toBe(false)
+    // Both turns stay resident: nothing is evicted below either budget.
+    expect(chatSeqs(snapshot)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+  })
+})
+
 describe('prompt and cancel errors', () => {
   it('routes an addressed child through non-activating history, continuation prompt, and interrupt only', async () => {
     const api = new FakeApiClient()

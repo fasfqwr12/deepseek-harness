@@ -14,7 +14,7 @@ import type { ReactNode } from 'react'
 import type { AssistantBlock } from '@deepseek-ai/dsh-client-runtime/client'
 import { JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
-import { ImageGallery, type ImageLoader } from '@deepseek-ai/dsh-client-ui-attachment'
+import { ImageGallery, type ImageLoader, type ImageReleaser } from '@deepseek-ai/dsh-client-ui-attachment'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import { messageImageLabels } from '../image-labels.ts'
 import { ReasoningRow } from './ReasoningRow.tsx'
@@ -25,8 +25,12 @@ export interface AssistantMarkdownProps {
   streaming: boolean
   /** Frozen partial of an aborted turn: rendered with a stopped marker. */
   interrupted?: boolean | undefined
+  /** Durable preference: Think rows start collapsed instead of following the stream. */
+  thinkCollapsed?: boolean | undefined
   /** Session-authorized durable image loader. */
-  loadImage?: ImageLoader
+  loadImage?: ImageLoader | undefined
+  /** Paired mount-claim release for the durable image loader. */
+  releaseImage?: ImageReleaser | undefined
   /** Resolved prose file mentions for this Assistant's closing turn. */
   mentions?: MarkdownFileMentions | undefined
   /** The owning view's locale seat, passed down as a plain prop. */
@@ -35,7 +39,7 @@ export interface AssistantMarkdownProps {
 
 /** Reasoning block as the Think variant summary row (figma 39:28304). */
 export const AssistantMarkdown = memo(function AssistantMarkdown({
-  blocks, streaming, interrupted, loadImage, mentions, t,
+  blocks, streaming, interrupted, thinkCollapsed, loadImage, releaseImage, mentions, t,
 }: AssistantMarkdownProps) {
   const imageLoader = loadImage ?? (() => Promise.reject(new Error(t('image.serviceUnavailable'))))
   // Stable per locale revision (t identity changes on switch): a fresh object
@@ -66,7 +70,15 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
         )
         break
       case 'reasoning':
-        rendered.push(<ReasoningRow key={i} text={block.text} running={streaming && i === last} t={t} />)
+        rendered.push(
+          <ReasoningRow
+            key={i}
+            text={block.text}
+            running={streaming && i === last}
+            defaultCollapsed={thinkCollapsed === true}
+            t={t}
+          />,
+        )
         break
       case 'image': {
         // Consecutive image blocks share one gallery so several images tile
@@ -82,7 +94,16 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
           group.push(next)
           i += 1
         }
-        rendered.push(<ImageGallery key={start} images={group} load={imageLoader} align="start" labels={messageImageLabels(t)} />)
+        rendered.push(
+          <ImageGallery
+            key={start}
+            images={group}
+            load={imageLoader}
+            release={releaseImage}
+            align="start"
+            labels={messageImageLabels(t)}
+          />,
+        )
         break
       }
       // Grouped into tool rows by ChatView; hasVisible above skips an empty shell.

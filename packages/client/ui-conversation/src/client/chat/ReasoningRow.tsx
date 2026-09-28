@@ -21,13 +21,17 @@ function latestLine(text: string): string {
  * Render one assistant reasoning block as the Think disclosure row.
  * @param props.text - complete or streaming reasoning text.
  * @param props.running - whether this block is the streaming tail.
+ * @param props.defaultCollapsed - open the row collapsed even while streaming.
  * @param props.t - conversation locale seat for the running status.
  * @returns the reasoning disclosure.
  */
-export function ReasoningRow({ text, running, t }: { text: string; running: boolean; t: ChatViewSlotProps['t'] }) {
-  // A live provider reasoning stream is useful only when it is visible. Once
-  // mounted, keep the user's expanded/collapsed choice through settlement.
-  const [expanded, setExpanded] = useState(running)
+export function ReasoningRow({
+  text, running, defaultCollapsed, t,
+}: { text: string; running: boolean; defaultCollapsed: boolean; t: ChatViewSlotProps['t'] }) {
+  // A live provider reasoning stream is useful only when it is visible, unless
+  // the durable preference asks for collapsed rows. Once mounted, keep the
+  // user's expanded/collapsed choice through settlement.
+  const [expanded, setExpanded] = useState(running && !defaultCollapsed)
   const summaryRef = useRef<HTMLSpanElement>(null)
   const summary = running ? latestLine(text) : firstLine(text)
   const scheduleSummaryScroll = useThrottledVisualUpdate(() => {

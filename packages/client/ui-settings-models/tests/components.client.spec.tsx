@@ -25,6 +25,7 @@ const OPENAI_TARGET = { provider: 'openai', displayName: 'openai' }
 const openaiCopy = (template: string): string => providerCopy(template, OPENAI_TARGET)
 const DEEPSEEK_TARGET = { provider: 'deepseek-official', displayName: 'DeepSeek' }
 const deepSeekCopy = (template: string): string => providerCopy(template, DEEPSEEK_TARGET)
+const ZOMBIE_TARGET = { provider: 'zombie', displayName: 'zombie' }
 
 /** Open one row's capacity disclosure (1-based, as the labels read). */
 function expandRow(position: number): void {
@@ -114,8 +115,8 @@ function wireNamespaces(): SettingsNamespaceView[] {
     {
       ns: 'llm-pi-ai',
       schema: JSON.parse(JSON.stringify(PiAiConfig.toJSON())) as unknown,
-      value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: {} } },
-      user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: {} } },
+      value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: { enabled: false } } },
+      user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: { enabled: false } } },
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -309,6 +310,7 @@ describe('ModelsSection', () => {
       removable: false,
       apiKeyEnv: 'X',
       credential,
+      enabled: true,
     })
     expect(needsSetup(row(undefined), false)).toBe(true)
     expect(needsSetup(row({ configured: true, writable: true }), false)).toBe(false)
@@ -1234,6 +1236,59 @@ describe('ModelsSection', () => {
       t={t}
     />)
     await screen.findByText('DeepSeek')
+  })
+
+  it('renders the enabled state of every configured row and flips it through settings.mutate', async () => {
+    const { mutate } = await mountSection()
+    // `openai` is configured and enabled (no `enabled` key resolves to the
+    // schema default), `zombie` is configured with a dormant route.
+    const openaiSwitch = screen.getByRole('switch', { name: openaiCopy(en.disableProvider) })
+    expect(openaiSwitch.getAttribute('aria-checked')).toBe('true')
+    const zombieSwitch = screen.getByRole('switch', { name: providerCopy(en.enableProvider, ZOMBIE_TARGET) })
+    expect(zombieSwitch.getAttribute('aria-checked')).toBe('false')
+
+    fireEvent.click(openaiSwitch)
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    expect(mutate.mock.calls[0]?.[0]).toEqual({
+      ns: 'llm-pi-ai',
+      ops: [{ op: 'set', path: ['providers', 'openai', 'enabled'], value: false }],
+    })
+  })
+
+  it('clears the override instead of writing true when a disabled provider is switched back on', async () => {
+    // Writing `true` would pin the route on even if the composition base later
+    // disables it; unsetting returns the field to the schema default.
+    const { mutate } = await mountSection()
+    fireEvent.click(screen.getByRole('switch', { name: providerCopy(en.enableProvider, ZOMBIE_TARGET) }))
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    expect(mutate.mock.calls[0]?.[0]).toEqual({
+      ns: 'llm-pi-ai',
+      ops: [{ op: 'unset', path: ['providers', 'zombie', 'enabled'] }],
+    })
+  })
+
+  it('keeps a refused enabled write visible on the row instead of silently reverting', async () => {
+    const { mutate } = await mountSection({
+      mutate: vi.fn(() => Promise.resolve(fail('read-only'))),
+    })
+    fireEvent.click(screen.getByRole('switch', { name: openaiCopy(en.disableProvider) }))
+    await waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    // The switch springs back, so the row must say why: otherwise the page
+    // claims a change the host never stored.
+    await screen.findByRole('alert')
+    expect(screen.getByRole('alert').textContent).toBe('read-only')
+    expect(screen.getByRole('switch', { name: openaiCopy(en.disableProvider) })
+      .getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('does not offer the switch on a read-only deployment', async () => {
+    const scripted = scriptedFace()
+    scripted.face.settings.describe = vi.fn(() => Promise.resolve(ok({
+      writable: false, hasDocument: false, namespaces: wireNamespaces(),
+    })))
+    await mountFace(scripted)
+    const openaiSwitch = screen.getByRole('switch', { name: openaiCopy(en.disableProvider) })
+    expect((openaiSwitch as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('removes by unsetting the profile path, never by rebuilding the section', async () => {

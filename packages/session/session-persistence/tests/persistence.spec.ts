@@ -519,6 +519,39 @@ describe('PersistenceCoordinator session preparations', () => {
     }
   })
 
+  it('cold load shares one data object between byte-identical stored events', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('load-dedupes-identical-data')
+    const repeatHeader = { header: { config: { provider: 'test', model: 'shared' } }, reason: 'change' }
+    backend.store.set(id, {
+      meta: meta(id),
+      events: [
+        { type: 'request/header', seq: 0, time: 1, data: { ...repeatHeader, reason: 'initial' } },
+        { type: 'request/header', seq: 1, time: 1, data: structuredClone(repeatHeader) },
+        { type: 'request/header', seq: 2, time: 1, data: structuredClone(repeatHeader) },
+        { type: 'request/header', seq: 3, time: 1, data: { header: { config: { provider: 'test', model: 'other' } }, reason: 'change' } },
+      ] as SessionEvent[],
+    })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      const loaded = await coordinator.load(id)
+      const [first, second, third, fourth] = loaded.events
+      expect(second?.data).toBe(third?.data)
+      expect(first?.data).not.toBe(second?.data)
+      expect(fourth?.data).not.toBe(second?.data)
+      expect(fourth?.data).toEqual({ header: { config: { provider: 'test', model: 'other' } }, reason: 'change' })
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('prefers a session that becomes live across preparation reads', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

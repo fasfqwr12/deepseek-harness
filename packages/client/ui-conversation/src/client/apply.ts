@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveSlotLabel, type BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
 import {
-  resolveWorkspacePath, type ISessions, type SessionId,
+  createSnapshotStore, resolveWorkspacePath, type ISessions, type SessionId,
 } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: the ctx.settingsScope Context merge. Cross-plugin collaboration
 // goes through the service, never a value import (client bundle purity gate).
@@ -27,6 +27,8 @@ import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
 import { InputBar } from './skeleton/InputBar.tsx'
 import { EnterBehaviorRow } from './settings/EnterBehaviorRow.tsx'
 import type { EnterBehaviorRowInjected } from './settings/EnterBehaviorRow.tsx'
+import { ThinkCollapsedRow } from './settings/ThinkCollapsedRow.tsx'
+import type { ThinkCollapsedRowInjected } from './settings/ThinkCollapsedRow.tsx'
 import { ChatView } from './chat/ChatView.tsx'
 import { StatsLine } from './chat/StatsLine.tsx'
 import { ApprovalPanel } from './skeleton/ApprovalPanel.tsx'
@@ -38,7 +40,7 @@ import { DetailsPanel } from './skeleton/DetailsPanel.tsx'
 import { en, NS, zh, type ConversationKey } from './locales.ts'
 import { registerConversationNodes } from './conversation-nodes/register.ts'
 import { registerChatNodeRenderers } from './chat/register-node-renderers.ts'
-import { CONVERSATION_SETTINGS_NAMESPACE, type ConversationSettings } from '../submission-settings.ts'
+import { CONVERSATION_SETTINGS_NAMESPACE, DEFAULT_THINK_COLLAPSED, type ConversationSettings } from '../submission-settings.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -85,9 +87,11 @@ const CHAT_NODE_INJECT: ChatNodeTurnDataInjected = {
           : undefined
       })
     },
+    // Default source for compositions without a Host settings provider; the
+    // apply-time register replaces it with the live durable preference.
+    thinkCollapsed: createSnapshotStore(DEFAULT_THINK_COLLAPSED),
   },
 }
-
 /** Resolve the session-scoped conversation face (scope-addressed send/cancel), failing loud. */
 function scopedConversation(sessions: ISessions, id: SessionId): IConversation {
   const scoped = sessions.scope(id)
@@ -144,6 +148,17 @@ export function apply(ctx: Context): void {
       setBusyEnter: (behavior) => { submissionPolicy.setBusyEnter(behavior) },
     }),
   }, EnterBehaviorRow))
+
+  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+    name: 'settings.general.item',
+    id: 'think-collapsed',
+    order: 30,
+    locale: NS,
+    inject: (): ThinkCollapsedRowInjected => ({
+      hooks: { thinkCollapsed: submissionPolicy.thinkCollapsed },
+      setThinkCollapsed: (collapsed) => { submissionPolicy.setThinkCollapsed(collapsed) },
+    }),
+  }, ThinkCollapsedRow))
 
   // Chat semantic reader positions by session, surviving view switches and
   // width reflow when the tab ring remounts the view. Deliberately not
@@ -380,7 +395,13 @@ export function apply(ctx: Context): void {
     label: () => t('view.chat'),
     locale: NS,
     children: {
-      'conversation.chat.node': { kind: 'keyed', scope: 'session', inject: CHAT_NODE_INJECT },
+      'conversation.chat.node': {
+        kind: 'keyed',
+        scope: 'session',
+        // Live preference source: the static constant covers compositions
+        // without a settings scope; here the durable one wins.
+        inject: { hooks: { ...CHAT_NODE_INJECT.hooks, thinkCollapsed: submissionPolicy.thinkCollapsed } },
+      },
     },
     store: chatStore,
     inject: (sessionId: SessionId, actions: BoundActions<typeof chatStore>): ChatViewInjected => {
@@ -401,6 +422,7 @@ export function apply(ctx: Context): void {
         },
         loadOlder: () => { void scoped.loadOlder() },
         loadImage: attachment => conversation.resolveImage(sessionId, attachment),
+        releaseImage: (attachment) => { conversation.releaseImage(sessionId, attachment) },
         // Unregistered 'trajectory' id is safe: the tab ring falls back to
         // the first view, and the untouched inspect target stays inert.
         inspectCall: (callId) => {

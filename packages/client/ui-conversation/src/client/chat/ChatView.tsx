@@ -24,6 +24,20 @@ import css from './ChatView.module.css'
 const FOLLOW_THRESHOLD = 24
 /** Reader-scroll distance from the head that arms auto-paging. */
 const TOP_PAGE_THRESHOLD = 48
+/**
+ * Render window (mounted rows, not loaded history): open shows only the
+ * latest TAIL_WINDOW_ROWS even when hundreds of pages already live in the
+ * session snapshot — mounted heavy nodes (Markdown, code blocks, tool cards)
+ * are what pinned the renderer main thread on 60MB+ transcripts.
+ */
+const TAIL_WINDOW_ROWS = 60
+/** Rows revealed per step when the window head moves up. */
+const WINDOW_PAGE_ROWS = 40
+/** Context rows kept above the restored scroll anchor after a remount. */
+const RESTORE_ANCHOR_SLOP = 8
+/** Pixel gap between the page being dropped and the viewport top before
+ *  inverse paging reclaims it; keeps a fast scroll from culling visible rows. */
+const RECLAIM_SLOP_PX = 8
 
 /** Active column host when present; otherwise the view-local scroller. */
 function scrollerOf(from: HTMLElement): HTMLElement {
@@ -146,7 +160,8 @@ function TurnStatus({ startTime, t }: {
  * ordered business Node crosses the keyed renderer seat.
  */
 export function ChatView({
-  useSession, useSessions, useStore, renderSlot, sessionId, openFile, loadOlder, loadImage, inspectCall, chatScroll, forkAt,
+  useSession, useSessions, useStore, renderSlot, sessionId, openFile, loadOlder, loadImage, releaseImage,
+  inspectCall, chatScroll, forkAt,
   fileMentions, t,
 }: ChatViewSlotProps) {
   const order = useSession(s => s.chat.order)
@@ -185,6 +200,29 @@ export function ChatView({
    *  scroll-driven at-bottom chrome re-render (which would snap inertial
    *  scrolls the rest of the way to the floor). */
   const followSigRef = useRef<string | null>(null)
+  /**
+   * Sliding render window head index into `order`; the tail is always the
+   * newest row. null means "not aligned yet": the first open commit derives
+   * the tail window below, so a huge already-loaded transcript never mounts
+   * its full row set even once (alignment lands in the pre-paint layout
+   * effect). Session remounts (SessionProvider keys the subtree by session
+   * id) reset the state.
+   */
+  const [windowStart, setWindowStart] = useState<number | null>(null)
+  /** Local window expansion/reclaim anchor — no request involved, unlike
+   * anchorRef which belongs to the backend prepend path. */
+  const localAnchorRef = useRef<PagingAnchor | null>(null)
+
+  /** Head index that keeps exactly the tail window mounted. */
+  const tailStart = Math.max(0, order.length - TAIL_WINDOW_ROWS)
+  /** Effective head for this commit: the tail window until alignment lands. */
+  const windowHead = windowStart ?? (openState === 'open' ? tailStart : 0)
+  const visibleKeys = useMemo(
+    () => (windowHead === 0 ? order : order.slice(windowHead)),
+    [order, windowHead],
+  )
+  /** Loaded rows currently held out of the mounted window, if any. */
+  const hiddenHeadRows = windowHead
 
   const firstKey = order[0]
   const firstSeq = firstKey === undefined ? null : nodeStore.get(firstKey)?.anchorSeq ?? null
@@ -195,11 +233,64 @@ export function ChatView({
 
   const toBottom = (el: HTMLElement): void => {
     anchorRef.current = null
+    localAnchorRef.current = null
+    // Reclaim the expanded window: unmount rows above the tail window so the
+    // mounted DOM stays bounded however far the reader paged up. The floor is
+    // always the latest tail window — a previously expanded head (start well
+    // above 0) collapses back to tailStart, and a start left past a grown
+    // tailStart clamps down with it. The browser shrink-clamps scrollTop onto
+    // the (shorter) floor, and the observed-top ledger knows that clamp.
+    setWindowStart(tailStart)
     el.scrollTop = el.scrollHeight
     observedTopRef.current = el.scrollTop
     atBottomRef.current = true
     setAtBottom(true)
     chatScroll.save(null)
+  }
+
+  /** Capture the row currently under the viewport as the local window anchor;
+   * the pre-paint layout effect restores its viewport position after the
+   * mounted set changes (delta is signed, so it serves both head expansion
+   * and head reclaim). */
+  const armLocalAnchor = (el: HTMLElement): void => {
+    const local = listRef.current
+    if (local === null) return
+    const row = pagingAnchor(local, el)
+    if (row !== null && row.dataset.chatAnchorKey !== undefined) {
+      localAnchorRef.current = { key: row.dataset.chatAnchorKey, top: flowTop(row, el) }
+    }
+  }
+
+  /** Reveal one page of already-loaded rows hidden above the window head. */
+  const expandWindow = (): void => {
+    if (windowHead <= 0) return
+    const local = listRef.current
+    if (local !== null) armLocalAnchor(scrollerOf(local))
+    setWindowStart(start => Math.max(0, (start ?? windowHead) - WINDOW_PAGE_ROWS))
+  }
+
+  /** Drop one head page once it sits entirely above the viewport, keeping
+   *  the mounted list bounded while the reader moves downward — including a
+   *  window fully expanded to the loaded head — without waiting for a
+   *  back-to-bottom click. */
+  const reclaimHead = (el: HTMLElement): void => {
+    // Already at the smallest tail window: nothing to reclaim, and no
+    // geometry read on an otherwise hot scroll path.
+    const nextHead = Math.min(
+      windowHead + WINDOW_PAGE_ROWS,
+      Math.max(0, order.length - TAIL_WINDOW_ROWS),
+    )
+    if (nextHead <= windowHead) return
+    const local = listRef.current
+    if (local === null) return
+    // Flow seats map 1:1 onto mounted order rows (nested tool-seat anchors
+    // carry no flow key): the guard row is the last row of the dropped page.
+    const guard = local.querySelectorAll<HTMLElement>('[data-chat-flow-key]')[WINDOW_PAGE_ROWS - 1]
+    if (guard === undefined) return
+    const viewportTop = el.getBoundingClientRect().top
+    if (guard.getBoundingClientRect().top > viewportTop - RECLAIM_SLOP_PX) return
+    armLocalAnchor(el)
+    setWindowStart(nextHead)
   }
 
   useLayoutEffect(() => {
@@ -211,8 +302,22 @@ export function ChatView({
     // survives from a previous mount (view-tab switch away and back), which
     // is restored instead of snapping the reader back to the floor.
     if (openState === 'open' && !openedRef.current) {
-      openedRef.current = true
       const saved = chatScroll.read()
+      // Align the render window before the first position write: tail window
+      // for a fresh open, or a window containing the saved semantic row for a
+      // remount restore. Defer the open branch until the aligned rows mount.
+      let alignedStart = tailStart
+      if (saved !== null) {
+        const anchorIndex = order.indexOf(saved.anchorKey)
+        if (anchorIndex >= 0) {
+          alignedStart = Math.max(0, Math.min(anchorIndex - RESTORE_ANCHOR_SLOP, tailStart))
+        }
+      }
+      if (windowStart !== alignedStart) {
+        setWindowStart(alignedStart)
+        return
+      }
+      openedRef.current = true
       if (saved === null) {
         toBottom(el)
       } else {
@@ -232,6 +337,24 @@ export function ChatView({
       lastSteeringIdRef.current = lastSteeringId
       followSigRef.current = followSig
       return
+    }
+    // A shrinking transcript (compaction/removal) can push the saved head
+    // past the new tail window: clamp before rendering an empty window.
+    if (windowStart !== null && windowStart > tailStart) {
+      setWindowStart(tailStart)
+      return
+    }
+    // Local window expansion (no history request): keep the anchored row at
+    // the same viewport position after extra mounted rows appear above it.
+    // The delta is signed, so head reclaim rides the same compensation.
+    if (localAnchorRef.current !== null) {
+      const localAnchor = localAnchorRef.current
+      const localRow = anchorElement(local, localAnchor.key)
+      if (localRow !== null) {
+        localAnchorRef.current = null
+        el.scrollTop += flowTop(localRow, el) - localAnchor.top
+        observedTopRef.current = el.scrollTop
+      }
     }
     // Prepend (head seq decreased): preserve the same settled row at the
     // position established by the reader's latest scroll. This excludes
@@ -298,13 +421,25 @@ export function ChatView({
     if (isAtBottom) chatScroll.save(null)
     else if (position !== null) chatScroll.save(position)
     observedTopRef.current = el.scrollTop
-    // Auto-page: reader scrolling near the head loads the previous page
-    // through the same anchored path as the button (anchor → prepend →
-    // compensation), so the button remains as fallback but is no longer
-    // the only trigger. loadingOlder serializes requests; the prepend
-    // compensation moves the reader off the threshold, so idling at the
-    // head does not re-fire.
-    if (hasMore && !loadingOlder && !isAtBottom && el.scrollTop <= TOP_PAGE_THRESHOLD) loadOlderAnchored()
+    // Auto-page near the head: reveal locally-windowed loaded rows first
+    // (instant, no RPC); only once the window reaches the loaded head does
+    // scrolling here fetch an older backend page. Either path's compensation
+    // moves the reader off the threshold, so idling at the head does not
+    // re-fire; loadingOlder serializes the backend requests.
+    if (!isAtBottom && el.scrollTop <= TOP_PAGE_THRESHOLD) {
+      if (windowHead > 0) expandWindow()
+      else if (hasMore && !loadingOlder) loadOlderAnchored()
+    } else if (!isAtBottom) {
+      // Inverse paging while reading downward keeps the mounted list bounded
+      // without a back-to-bottom click: head pages already above the viewport
+      // are dropped, with anchor compensation holding the visible content.
+      reclaimHead(el)
+    } else if (el.scrollTop >= floor - 0.5 && windowHead !== tailStart) {
+      // Flush with the floor (any window shape): reclaim the tail window.
+      // The shrink-clamp delivery is recognized as non-reader input.
+      localAnchorRef.current = null
+      setWindowStart(tailStart)
+    }
   }
 
   // Bind the scroll listener on the resolved scrollport once per mount;
@@ -381,14 +516,23 @@ export function ChatView({
               {t('chat.loadError', { message: openError.message, code: openError.code })}
             </div>
           )}
-          {hasMore && (
+          {/* Head controls: while loaded rows sit outside the window an
+              instant local expand owns the head; only after the window
+              reaches the loaded head does backend history paging show. */}
+          {hiddenHeadRows > 0 ? (
+            <div className={css.older}>
+              <button type="button" onClick={expandWindow}>
+                {t('chat.showEarlier', { count: Math.min(hiddenHeadRows, WINDOW_PAGE_ROWS) })}
+              </button>
+            </div>
+          ) : hasMore && (
             <div className={css.older}>
               <button type="button" disabled={loadingOlder} onClick={loadOlderAnchored}>
                 {loadingOlder ? t('loading') : t('chat.loadOlder')}
               </button>
             </div>
           )}
-          {order.map(nodeKey => (
+          {visibleKeys.map(nodeKey => (
             <ChatNodeSeat
               key={nodeKey}
               nodeKey={nodeKey}
@@ -399,6 +543,7 @@ export function ChatView({
               inspectCall={inspectCall}
               forkAt={forkAt}
               loadImage={loadImage}
+              releaseImage={releaseImage}
               fileMentions={fileMentions}
               renderSlot={renderSlot}
               t={t}
@@ -411,7 +556,13 @@ export function ChatView({
               wait, tool execution, streaming) so it never flickers per step. */}
           {running && <TurnStatus startTime={runningTurnStart} t={t} />}
           {pendingSteering.map(item => (
-            <PendingSteeringBubble key={item.id} content={item.content} loadImage={loadImage} t={t} />
+            <PendingSteeringBubble
+              key={item.id}
+              content={item.content}
+              loadImage={loadImage}
+              releaseImage={releaseImage}
+              t={t}
+            />
           ))}
         </div>
         {!atBottom && (

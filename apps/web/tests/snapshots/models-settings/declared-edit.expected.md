@@ -23,10 +23,12 @@
     - listitem:
       - text: minimax-cn
       - img "API 密钥已配置"
+      - switch "停用 minimax-cn" [checked]: 已启用
       - button "编辑 minimax-cn": 编辑
       - button "删除 minimax-cn": 删除
     - listitem:
       - text: Acme Gateway 自定义
+      - switch "停用 Acme Gateway (acme-gateway)" [checked]: 已启用
       - button "编辑 Acme Gateway (acme-gateway)": 编辑
       - button "删除 Acme Gateway (acme-gateway)": 删除
       - text: Acme Gateway acme-gateway API 密钥
@@ -46,6 +48,7 @@
           - option "openai-completions" [selected]
           - option "openai-responses"
           - option "anthropic-messages"
+          - option "google-generative-ai"
         - region "模型目录":
           - text: 模型目录 已自定义模型目录
           - button "恢复默认模型"

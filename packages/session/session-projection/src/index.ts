@@ -384,6 +384,38 @@ export class SessionProjectionRegistry extends Service {
     }
   }
 
+  /**
+   * Seed live cells for one session from persisted checkpoint rows, replaying
+   * only the in-memory tail past each usable row's watermark instead of
+   * folding the full log from init. A row is usable when its `ver` matches
+   * the unit's `stateVersion` and its `seq` does not exceed the session's
+   * last event — a row claiming further is stale beyond repair and is
+   * discarded, leaving that unit's cell unset so the lazy full-log fold
+   * (the previous behavior) still serves it. Already-built cells are left
+   * untouched: seeding belongs to the session/created boundary, before any
+   * committed event drives the session. The caller owns log identity — rows
+   * read from the persisted cache must be identity-matched first.
+   * @param session - the live session whose cells are seeded.
+   * @param checkpoint - persisted rows for that session.
+   */
+  seedCheckpoint(session: Session, checkpoint: ProjectionCheckpoint): void {
+    const endSeq = session.seq - 1
+    if (endSeq < 0) return
+    for (const registration of this.registrations.values()) {
+      if (registration.cells.has(session)) continue
+      const def = registration.def
+      const row = checkpoint[def.key]
+      if (row === undefined || row.ver !== def.stateVersion || row.seq > endSeq) continue
+      let state = row.val
+      const events = session.events
+      for (let seq = row.seq + 1; seq <= endSeq; seq++) {
+        // oxlint-disable-next-line typescript/no-non-null-assertion -- contiguous session seqs index the durable log
+        state = def.apply(state, events[seq]!)
+      }
+      registration.cells.set(session, { state, observedSeq: endSeq })
+    }
+  }
+
   /** Fold one unit from init over `events`, producing a cell watermarked at the last folded event. */
   private buildCell(def: ErasedDefinition, events: readonly SessionEvent[]): UnitCell {
     let state = def.init()

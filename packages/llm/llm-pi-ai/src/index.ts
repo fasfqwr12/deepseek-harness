@@ -32,9 +32,12 @@
  *         apiKeyEnv: ACME_GATEWAY_API_KEY
  *         api: openai-completions
  *         baseURL: https://gateway.acme.example/v1
- *         # Reasoning dialect for a URL pi-ai cannot recognize.
+ *         # Reasoning dialect for a URL pi-ai cannot recognize;
+ *         # supportsDeveloperRole: false keeps the system prompt a `system`
+ *         # message for gateways whose upstream rejects OpenAI's `developer` role.
  *         compat:
  *           thinkingFormat: deepseek
+ *           supportsDeveloperRole: false
  *         models:
  *           - id: acme-large
  *             name: Acme Large
@@ -89,10 +92,13 @@ const NS = settingsNamespace('llm-pi-ai')
 /**
  * The registry captures these per route; a change here must re-register.
  * Sorted by provider so a settings document that merely reorders its keys is
- * not mistaken for a route change.
+ * not mistaken for a route change. A disabled profile is absent: flipping
+ * `enabled` must re-register the route off (or back on), and leaving it in
+ * with a fact that never varies would keep the route serving.
  */
 function registrationFacts(profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>): unknown {
   return [...profiles.entries()]
+    .filter(([, profile]) => profile.enabled)
     // `displayName` rides along because the registry hands it to every selector
     // through `providerInfo()`: a rename that did not re-register would leave
     // the old label showing until some unrelated fact happened to change.
@@ -104,6 +110,11 @@ function registrationFacts(profiles: ReadonlyMap<string, ResolvedPiAiProviderPro
     .sort((left, right) => left.provider.localeCompare(right.provider))
 }
 
+/** The routes this profile set registers: enabled profiles only, in configuration order. */
+function servingRoutes(profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>): string[] {
+  return [...profiles.entries()].filter(([, profile]) => profile.enabled).map(([provider]) => provider)
+}
+
 /**
  * The configurable-provider directory: every installed catalog route this
  * adapter can authenticate, plus every route the current profiles declare. A
@@ -113,7 +124,9 @@ function registrationFacts(profiles: ReadonlyMap<string, ResolvedPiAiProviderPro
  *
  * The profile half is unconditional, which is what keeps a route already
  * stored against a withheld provider editable and deletable rather than
- * stranded in the settings document with nothing on the page to remove it.
+ * stranded in the settings document with nothing on the page to remove it. A
+ * disabled profile is listed for the same reason and reads `active: false`
+ * from the registry: the page must be able to switch it back on.
  * @param profiles - the currently resolved provider profiles.
  * @returns the directory entries in catalog order, declared routes last.
  */
@@ -265,7 +278,7 @@ export function apply(ctx: Context, config: Config): void {
     // conflicting route leaves the previous routes serving requests, and
     // `registeredFacts` only advances once the registry actually holds the
     // new set — so returning to a working configuration always re-applies.
-    const routes = [...profiles().keys()]
+    const routes = servingRoutes(profiles())
     if (registration === undefined) {
       // Dormant bare mount: nothing is registered until a section supplies
       // profiles, and an empty section keeps it that way.

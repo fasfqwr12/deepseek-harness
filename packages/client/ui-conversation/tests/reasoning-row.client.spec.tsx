@@ -129,4 +129,31 @@ describe('ReasoningRow', () => {
     expect(view.getByRole('button').getAttribute('aria-expanded')).toBe('true')
     expect(view.getByText('正在检查中间步骤')).toBeTruthy()
   })
+
+  it('starts collapsed under the durable preference, in both live and settled states', () => {
+    const live = render(
+      <AssistantMarkdown
+        t={t}
+        blocks={[{ kind: 'reasoning', text: 'Inspect the session\nNewest reasoning tokens' }]}
+        streaming
+        thinkCollapsed
+      />,
+    )
+    expect(live.getByRole('button').getAttribute('aria-expanded')).toBe('false')
+    expect(live.getByText('Newest reasoning tokens')).toBeTruthy()
+    live.unmount()
+
+    const settled = render(
+      <AssistantMarkdown
+        t={t}
+        blocks={[{ kind: 'reasoning', text: 'Inspect the session\nCheck persistence' }]}
+        streaming={false}
+        thinkCollapsed
+      />,
+    )
+    expect(settled.getByRole('button').getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(settled.getByText('Think'))
+    expect(settled.getByRole('button').getAttribute('aria-expanded')).toBe('true')
+    expect(settled.getByText(/Check persistence/)).toBeTruthy()
+  })
 })

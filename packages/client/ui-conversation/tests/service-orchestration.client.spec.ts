@@ -129,6 +129,61 @@ describe('ConversationController', () => {
     await b.runtime.dispose()
   })
 
+  it('bounds historical image URLs with retain counts and an LRU that never evicts mounted images', async () => {
+    const readAttachment = vi.fn((id: string) => Promise.resolve({
+      ok: true as const,
+      value: {
+        attachment: { attachmentId: id, mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
+        data: Uint8Array.of(1),
+      },
+    }))
+    const b = await bench(readAttachment as unknown as SessionFace['readAttachment'])
+    const sessionId = b.runtime.sessions.behavior('s1').sessionId
+    const ref = (id: number) => ({
+      attachmentId: AttachmentId(`image-${id}`), mediaType: 'image/png', bytes: 1, width: 1, height: 1,
+    } as const)
+    let urlSeq = 0
+    const revoked: string[] = []
+    const created = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:${urlSeq++}`)
+    const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation((url) => { revoked.push(String(url)) })
+    const mount = (id: number): Promise<string> => b.root.resolveImage(sessionId, ref(id))
+    const unmount = (id: number): void => b.root.releaseImage(sessionId, ref(id))
+    try {
+      // 65 resolved, all still mounted: the cap may not revoke a live image.
+      for (let i = 0; i < 65; i += 1) await mount(i)
+      expect(revoked).toEqual([])
+      // Release the 63 oldest (images 0..62 stay mounted... no: 63/64 stay
+      // mounted): the first overflow evicts exactly image-0.
+      for (let i = 0; i < 63; i += 1) unmount(i)
+      expect(revoked).toEqual(['blob:0'])
+      // Churn new mounts while image-63/64 stay mounted: they survive any
+      // cache growth; eviction walks oldest unclaimed entries (1, 2, …).
+      for (let i = 65; i < 100; i += 1) { await mount(i); unmount(i) }
+      expect(revoked).not.toContain('blob:63')
+      expect(revoked).not.toContain('blob:64')
+      // A cache hit takes no read and adds a second claim; one release keeps
+      // the URL mounted, so it still cannot be evicted.
+      const reads = readAttachment.mock.calls.length
+      await expect(mount(64)).resolves.toBe('blob:64')
+      expect(readAttachment).toHaveBeenCalledTimes(reads)
+      unmount(64)
+      for (let i = 200; i < 261; i += 1) { await mount(i); unmount(i) }
+      expect(revoked).not.toContain('blob:63')
+      expect(revoked).not.toContain('blob:64')
+      // Drop the last claims: further churn walks the LRU onto them now that
+      // they are ordinary unclaimed residents (64 was touched, so 63 is older).
+      unmount(63)
+      unmount(64)
+      for (let i = 400; i < 403; i += 1) { await mount(i); unmount(i) }
+      expect(revoked).toContain('blob:63')
+      expect(revoked).toContain('blob:64')
+    } finally {
+      created.mockRestore()
+      revokeSpy.mockRestore()
+    }
+    await b.runtime.dispose()
+  })
+
   it('fails loudly from the root scope, on an unbound session, or without SessionRuntime', async () => {
     const b = await bench()
     await expect(b.root.send('x')).rejects.toThrow(/requires a session scope/)

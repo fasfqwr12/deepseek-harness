@@ -162,6 +162,7 @@ function makeHarness(init?: Partial<ConversationSnapshot>) {
     read: () => savedScroll,
   }
   const forkAt = vi.fn()
+  const releaseImage = vi.fn()
   // Selection rides the REAL chat store (same construction path as
   // production; the view reads it through the PropsStore useStore share).
   const chat = createChatStore().create()
@@ -193,8 +194,9 @@ function makeHarness(init?: Partial<ConversationSnapshot>) {
         ? location.turn.data.get(dataKey)
         : undefined
     })
+    const useThinkCollapsed: ChatNodeViewProps['useThinkCollapsed'] = selector => selector(false)
     const nodeProps = <Kind extends ChatNode['kind']>(): ChatNodeViewProps<Kind> => (
-      { ...props, ...nodeOwner, useTurnData } as unknown as ChatNodeViewProps<Kind>
+      { ...props, ...nodeOwner, useTurnData, useThinkCollapsed } as unknown as ChatNodeViewProps<Kind>
     )
     switch (nodeOwner.node.kind) {
       case 'user':
@@ -284,6 +286,7 @@ function makeHarness(init?: Partial<ConversationSnapshot>) {
     openFile,
     loadOlder,
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
+    releaseImage,
     inspectCall,
     chatScroll,
     forkAt,
@@ -295,7 +298,7 @@ function makeHarness(init?: Partial<ConversationSnapshot>) {
   const setSelection = (next: SelectionTarget | null): void => { chat.actions.select(next) }
   return {
     set, ChatView, props, openDetails, openFile, loadOlder, inspectCall,
-    chatScroll, forkAt, setSelection, toolOwners,
+    chatScroll, forkAt, releaseImage, setSelection, toolOwners,
   }
 }
 
@@ -1259,6 +1262,130 @@ describe('ChatView', () => {
       h.set({ loadingOlder: false, nodes: [user(1, 'old'), assistant(2, 'b'), user(5, 'later'), assistant(6, 'a')] })
     })
     expect(scroller.scrollTop).toBe(600) // reader offset 0 + the anchored row's 600px shift
+  })
+
+  describe('sliding render window', () => {
+    // Alternating user/assistant rows with unique seqs: one flow seat each,
+    // no turn tails (turnEnds omitted) so row counts map 1:1 onto nodes.
+    const transcript = (count: number) => Array.from({ length: count }, (_unused, index) => {
+      const seq = index + 1
+      return seq % 2 === 1 ? user(seq, `u${seq}`) : assistant(seq, `a${seq}`)
+    })
+    const flowRowCount = (view: ReturnType<typeof render>): number =>
+      view.container.querySelectorAll('[data-chat-flow-key]').length
+    const flowKey = (seq: number): string =>
+      `fixture:${seq % 2 === 1 ? 'user' : 'assistant'}:${seq}`
+
+    it('opens with only the latest 60 rows mounted and offers local expansion', () => {
+      const h = makeHarness({ nodes: transcript(100) })
+      const view = render(<h.ChatView {...h.props} />)
+      // The tail window, not the full loaded transcript, mounts.
+      expect(flowRowCount(view)).toBe(60)
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(1)}"]`)).toBeNull()
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(41)}"]`)).not.toBeNull()
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(100)}"]`)).not.toBeNull()
+      // Loaded rows sit above the window: local expansion owns the head, and
+      // the backend pager must not render while hidden loaded rows remain.
+      expect(view.getByText('展开更早的 40 条')).toBeTruthy()
+      expect(view.queryByText('加载更早')).toBeNull()
+      fireEvent.click(view.getByText('展开更早的 40 条'))
+      expect(flowRowCount(view)).toBe(100)
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(1)}"]`)).not.toBeNull()
+      expect(view.queryByText('展开更早的 40 条')).toBeNull()
+    })
+
+    it('expands one 40-row page at a time and names the partial final page', () => {
+      const h = makeHarness({ nodes: transcript(150) })
+      const view = render(<h.ChatView {...h.props} />)
+      expect(flowRowCount(view)).toBe(60)
+      fireEvent.click(view.getByText('展开更早的 40 条'))
+      expect(flowRowCount(view)).toBe(100)
+      expect(view.getByText('展开更早的 40 条')).toBeTruthy()
+      fireEvent.click(view.getByText('展开更早的 40 条'))
+      expect(flowRowCount(view)).toBe(140)
+      // Only ten loaded rows remain hidden: the button reports the real rest.
+      expect(view.getByText('展开更早的 10 条')).toBeTruthy()
+      fireEvent.click(view.getByText('展开更早的 10 条'))
+      expect(flowRowCount(view)).toBe(150)
+      expect(view.container.querySelector('[class*="older"]')).toBeNull()
+    })
+
+    it('near-head scroll expands the local window before touching backend paging', () => {
+      const h = makeHarness({ nodes: transcript(100), hasMore: true })
+      const view = render(<h.ChatView {...h.props} />)
+      const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+      installScrollMetrics(scroller, 5_000, 400)
+      // Prime reader ownership away from the open-pinned bottom first.
+      readerScroll(scroller, 4_000)
+      expect(h.loadOlder).not.toHaveBeenCalled()
+      // First hit of the head reveals hidden loaded rows locally (no RPC).
+      readerScroll(scroller, 0)
+      expect(flowRowCount(view)).toBe(100)
+      expect(h.loadOlder).not.toHaveBeenCalled()
+      // Only now that the window reaches the loaded head does the backend
+      // pager render and the next near-head scroll fetch a page.
+      expect(view.getByText('加载更早')).toBeTruthy()
+      fireEvent.scroll(scroller)
+      expect(h.loadOlder).toHaveBeenCalledTimes(1)
+      act(() => { h.set({ loadingOlder: true }) })
+      fireEvent.scroll(scroller)
+      expect(h.loadOlder).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the anchored row at the same viewport position while the head expands', () => {
+      const h = makeHarness({ nodes: transcript(100) })
+      const view = render(<h.ChatView {...h.props} />)
+      const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+      Object.defineProperty(scroller, 'scrollHeight', { value: 3_000, writable: true })
+      Object.defineProperty(scroller, 'clientHeight', { value: 400, writable: true })
+      vi.spyOn(scroller, 'getBoundingClientRect').mockImplementation(
+        () => ({ top: 0, bottom: 400 } as DOMRect),
+      )
+      // The first mounted row is the anchor: 100px before expansion, and 400px
+      // of newly mounted head rows push it to 500px in the same commit.
+      const anchor = view.container.querySelector(`[data-chat-flow-key="${flowKey(41)}"]`) as HTMLElement
+      vi.spyOn(anchor, 'getBoundingClientRect').mockImplementation(() => {
+        const top = flowRowCount(view) > 60 ? 500 : 100
+        return { top, bottom: top + 40 } as DOMRect
+      })
+      readerScroll(scroller, 2_000)
+      readerScroll(scroller, 0)
+      // Compensation restores the anchor: 0 + (500 - 100).
+      expect(scroller.scrollTop).toBe(400)
+    })
+
+    it('reclaims the tail window when the reader returns to the bottom', () => {
+      const h = makeHarness({ nodes: transcript(100) })
+      const view = render(<h.ChatView {...h.props} />)
+      const scroller = view.container.querySelector('[class*="scroll"]') as HTMLDivElement
+      installScrollMetrics(scroller, 3_000, 400)
+      fireEvent.click(view.getByText('展开更早的 40 条'))
+      expect(flowRowCount(view)).toBe(100)
+      readerScroll(scroller, 1_500)
+      fireEvent.click(view.getByLabelText('回到底部'))
+      // The browser shrink-clamps onto the new floor; mounted rows drop back
+      // to the bounded tail window and the local-expand control returns.
+      expect(scroller.scrollTop).toBe(2_600)
+      expect(flowRowCount(view)).toBe(60)
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(1)}"]`)).toBeNull()
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(41)}"]`)).not.toBeNull()
+      expect(view.getByText('展开更早的 40 条')).toBeTruthy()
+    })
+
+    it('reclaims the expanded window when an own trailing message force-pins the floor', () => {
+      const h = makeHarness({ nodes: transcript(100) })
+      const view = render(<h.ChatView {...h.props} />)
+      // Expansion by click leaves the reader pinned to the floor.
+      fireEvent.click(view.getByText('展开更早的 40 条'))
+      expect(flowRowCount(view)).toBe(100)
+      act(() => { h.set({ nodes: [...transcript(100), user(101, 'mine')] }) })
+      // The trailing user node triggers toBottom, which reclaims to the new
+      // tail window: latest 60, newest row visible.
+      expect(flowRowCount(view)).toBe(60)
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(41)}"]`)).toBeNull()
+      expect(view.container.querySelector(`[data-chat-flow-key="${flowKey(42)}"]`)).not.toBeNull()
+      expect(view.getByText('mine')).toBeTruthy()
+    })
   })
 
   it('shows open error and loading states', () => {

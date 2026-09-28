@@ -7,7 +7,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   CommandNode, CompactionSummaryNode, ConversationSnapshot, ConversationTurnDataMap,
-  ObservableSnapshot, PendingInteraction, PendingWait, SessionId, ToolCallBlock,
+  ObservableSnapshot, PendingInteraction, PendingWait, SessionId, SnapshotStore, ToolCallBlock,
   TurnLocation, WorkspaceId,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -349,6 +349,8 @@ export type UseChatNodeTurnData = <Key extends Extract<keyof ConversationTurnDat
 export interface ChatNodeTurnDataInjected {
   hooks: {
     turnData: SlotHookFactory<'conversation.chat.node', UseChatNodeTurnData>
+    /** Durable preference: Think rows start collapsed instead of following the stream. */
+    thinkCollapsed: SnapshotStore<boolean>
   }
 }
 
@@ -363,6 +365,8 @@ export interface ChatNodeOwnerProps {
   forkAt: (seq: number) => void
   /** Resolve a session-authorized historical image for inline display. */
   loadImage: (attachment: ImageAttachmentRef) => Promise<string>
+  /** Release one inline image's mount claim so its blob URL can be evicted. */
+  releaseImage: (attachment: ImageAttachmentRef) => void
   fileMentions: (owner: TurnTailOwnerProps) => MarkdownFileMentions | undefined
 }
 
@@ -683,6 +687,8 @@ export interface ChatViewInjected {
   loadOlder: () => void
   /** Resolve a session-authorized historical image for inline display. */
   loadImage: (attachment: ImageAttachmentRef) => Promise<string>
+  /** Release one inline image's mount claim (paired with every loadImage call). */
+  releaseImage: (attachment: ImageAttachmentRef) => void
   /** Hand a call off to the trajectory view: write the one-shot inspect target and switch tabs. */
   inspectCall: (callId: CallId) => void
   /**

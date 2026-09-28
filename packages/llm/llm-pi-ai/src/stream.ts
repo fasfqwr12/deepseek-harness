@@ -8,7 +8,7 @@
  * @module dsh-llm-pi-ai/stream
  */
 
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isFarFutureRateLimitReset, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
@@ -38,10 +38,25 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
 function classifyPiAiError(message: string): string {
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
+  // 402 Payment Required: gateways that answer in-band (every relay and
+  // subscription-conversion gateway in production logs) emit it with no body,
+  // so the text carries nothing but the status. Exhausted balance fails
+  // identically on every attempt, the same terminal class as a depleted
+  // credential — never retried.
+  if (/\b402\b/.test(message)) return QUOTA_EXCEEDED_CODE
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
+  // A rate limit that announces its reset point beyond the retry horizon
+  // (Chinese gateways: `将于 2026-09-24 15:25:52 UTC+8 重置`) cannot be waited
+  // out inside one request's retry loop; retrying until exhaustion only burns
+  // the backoff budget. Classify it as the quota wall it factually is.
+  if (/\b429\b|rate.?limit/i.test(message) && isFarFutureRateLimitReset(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
   if (/server_is_overloaded|\bservers?\s+(?:is|are)\s+(?:currently\s+)?overloaded\b|\boverloaded\b.*\btry again later\b|\btry again later\b.*\boverloaded\b/i.test(message)) return 'SERVER'
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
+  // 408 Request Timeout: the plain status (often with no body) names the same
+  // transient class as a client-side timeout; OpenAI, Anthropic, and Google
+  // SDKs all retry it.
+  if (/\b408\b/.test(message)) return 'TIMEOUT'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider

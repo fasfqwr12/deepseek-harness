@@ -99,6 +99,9 @@
       name: '@deepseek-ai/dsh-session-persistence-jsonl'
       config:
         root: !!js dshHomePath('sessions')
+        # Keep fewer unpublished cold preparations resident in the Web process.
+        # Durable logs remain unchanged; this only bounds the resume cache.
+        preparedSessionCacheSize: 2
 
     # Durable image bytes live outside the append-only session log. Messages
     # keep content-addressed references that this shared backend resolves for

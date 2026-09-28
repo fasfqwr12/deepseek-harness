@@ -86,6 +86,7 @@ export class SessionProjectionCache extends Service {
     this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
     this.installWritePath()
+    this.installSeedPath()
   }
 
   /**
@@ -197,6 +198,27 @@ export class SessionProjectionCache extends Service {
   }
 
   // --- write-behind (throttle + mandatory points) ---
+
+  /**
+   * Seed live cells from the identity-matched persisted row on the
+   * session/created boundary. Without it the eager drive folds the full
+   * in-memory log from init for every unit whose cell is missing — one whole
+   * stored-log walk per unit on every large resumed session. Synchronous
+   * from the domain's in-memory state, so the seed lands before the first
+   * committed event can drive. Contained: a seeding failure logs and leaves
+   * the lazy full-log fold in charge; it must never veto the creation the
+   * announce boundary guards.
+   */
+  private installSeedPath(): void {
+    this.ctx.on('session/created', (session: Session) => {
+      try {
+        const record = this.recordFor(session.id, identityOf(session.header))
+        if (record !== undefined) this.ctx.sessionProjections.seedCheckpoint(session, record.rows)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`session projection cache: seeding cells for "${session.id}" failed (cells fold lazily): ${String(error)}`)
+      }
+    })
+  }
 
   private installWritePath(): void {
     // Every committed event advances the dirty counter; turn/end is a

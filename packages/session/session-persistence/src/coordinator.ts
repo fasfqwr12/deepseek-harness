@@ -5,6 +5,7 @@
  * @module @deepseek-ai/dsh-session-persistence/coordinator
  */
 
+import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import {
   adoptSessionEvent,
@@ -673,17 +674,38 @@ function tailSlice(meta: SessionHeader, events: SessionEvent[], maxEvents: numbe
   }
 }
 
+/**
+ * Share one data object between events whose `data` is byte-identical, so a
+ * stored log's repeated snapshots collapse to one resident copy instead of one
+ * per event. A retry loop's `request/header` snapshots are the dominant case:
+ * a large log holds thousands of byte-identical 60KB+ headers, each previously
+ * materialized as its own parsed copy. The map holds only SHA-256 digests as
+ * keys; each shared value is the first matching event's `data` and is frozen
+ * later together with its owning events. Value-preserving: every event stays
+ * deep-equal to its stored bytes and only object identity collapses.
+ */
+function shareDuplicateEventData(event: SessionEvent, shared: Map<string, unknown>): SessionEvent {
+  const key = createHash('sha256').update(JSON.stringify(event.data)).digest('hex')
+  const existing = shared.get(key)
+  if (existing !== undefined) {
+    return { ...event, data: existing } as SessionEvent
+  }
+  shared.set(key, event.data)
+  return event
+}
+
 /** Upgrade and validate an exclusively owned backend result without copying it. */
 function adoptStoredEvents(events: SessionEvent[], id: SessionId): SessionEvent[] {
   assertSupportedEvents(events, id)
   const messageIds = new Map<number, PersistedMessageId>()
   const location: ScanLocation = { turn: undefined, step: undefined }
+  const sharedData = new Map<string, unknown>()
   for (const [index, event] of events.entries()) {
     const migratedStart = migrateLegacyTurnStartEvent(event, id)
     const migratedTurn = migrateLegacyTurnEndEvent(migratedStart, id)
     const migratedSteering = migrateLegacySteeringEvent(migratedTurn, id)
     const backfilled = backfillDispatchLocation(migratedSteering, location)
-    const adopted = adoptSessionEvent(migrateLegacyMessageEvent(backfilled, id, messageIds))
+    const adopted = adoptSessionEvent(shareDuplicateEventData(migrateLegacyMessageEvent(backfilled, id, messageIds), sharedData))
     events[index] = adopted
     advanceScanLocation(location, adopted)
     const messageId = eventMessageId(adopted)

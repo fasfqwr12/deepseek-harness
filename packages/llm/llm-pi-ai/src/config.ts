@@ -64,6 +64,13 @@ export type {
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
 export interface PiAiProviderProfile {
+  /**
+   * Whether this route serves requests. A disabled route stays configured —
+   * its key, models, and profile are untouched and re-enabling restores it
+   * exactly — but registers nothing, so it disappears from every model
+   * selector while remaining editable here.
+   */
+  enabled?: boolean
   /** Credential reference (environment-variable name) resolved per request through `ctx.credentials`. */
   apiKeyEnv?: string
   /** Name shown by configuration surfaces; defaults to the route key. */
@@ -95,7 +102,8 @@ export interface PiAiProviderProfile {
    * Reasoning-dispatch switches for every `openai-completions` model on this
    * route; each model's own `compat` overrides per field. What neither sets
    * keeps the installed catalog entry's value, then pi-ai's baseURL-derived
-   * detection.
+   * detection. `supportsDeveloperRole` forces the system prompt's wire role
+   * for gateways whose upstream rejects the OpenAI `developer` role.
    */
   compat?: PiAiCompatProfile
   /**
@@ -143,11 +151,13 @@ export interface PiAiProviderProfile {
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'enabled'> {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
   displayName: string
+  /** Whether this route registers and serves requests, after defaulting. */
+  enabled: boolean
   /** Validated credential reference, when one is configured. */
   apiKeyEnv?: CredentialRef
   /** Positive finite provider-idle interval after defaulting. */
@@ -189,6 +199,7 @@ const thinkingBudgets = z.object({
 const compatProfile: z<PiAiCompatProfile> = z.object({
   thinkingFormat: z.union(SUPPORTED_THINKING_FORMATS),
   supportsReasoningEffort: z.boolean(),
+  supportsDeveloperRole: z.boolean(),
 })
 
 /**
@@ -231,6 +242,7 @@ const modelProfile: z<PiAiModelProfile> = z.object({
 const modelOverride: z<PiAiModelOverride> = z.object(modelFields)
 
 const profile = z.object({
+  enabled: z.boolean().default(true),
   apiKeyEnv: z.string().role('credential-ref'),
   displayName: z.string(),
   api: z.union(supportedProtocols()),
@@ -348,11 +360,15 @@ export function resolveProfiles(
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
+    // The schema's default covers an absent key; reading it here keeps the
+    // resolved profile the one place a consumer asks whether the route serves.
+    const enabled = source.enabled ?? true
+    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, enabled: _enabled, ...rest } = source
     resolved.set(provider, {
       ...rest,
       provider,
       displayName,
+      enabled,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),

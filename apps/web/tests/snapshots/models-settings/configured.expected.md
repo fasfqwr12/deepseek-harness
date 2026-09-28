@@ -24,6 +24,7 @@
     - listitem:
       - text: minimax-cn
       - img "API 密钥已配置"
+      - switch "停用 minimax-cn" [checked]: 已启用
       - button "编辑 minimax-cn": 编辑
       - button "删除 minimax-cn": 删除
   - button "添加提供方":

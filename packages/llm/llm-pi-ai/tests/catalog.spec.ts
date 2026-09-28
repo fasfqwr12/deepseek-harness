@@ -324,6 +324,20 @@ describe('hand-declared providers', () => {
     },
   )
 
+  it('serves google-generative-ai, whose key-and-endpoint shape a profile carries', () => {
+    expect(supportedProtocols()).toContain('google-generative-ai')
+    const resolved = resolveProfiles({
+      'gemini-gateway': {
+        api: 'google-generative-ai',
+        baseURL: 'https://gemini.test/v1beta',
+        models: [{ id: 'gemini-3-flash' }],
+      },
+    })
+    // The version path stays part of the endpoint: pi-ai's Google client
+    // consumes `baseUrl` verbatim and appends only the model route.
+    expect(resolved.get('gemini-gateway')?.piProvider.getModels()[0]?.baseUrl).toBe('https://gemini.test/v1beta')
+  })
+
   it('rejects a protocol this build cannot serve, and a route that names none', () => {
     const spec = { provider: 'acme-gateway', displayName: 'Acme Gateway', models: [], namesCredential: true }
     expect(() => buildProvider({ ...spec, api: 'quantum-telepathy' }))
@@ -843,6 +857,46 @@ describe('reasoning-dispatch compat switches', () => {
     expect(() => resolveProfiles({
       anthropic: { compat: { thinkingFormat: 'openai' } },
     })).toThrow(/no model on the route speaks openai-completions/)
+  })
+
+  it('forces the system prompt off the developer role on gateways that reject it', () => {
+    // A hand-declared gateway pi-ai's URL detection does not recognize defaults
+    // to supportsDeveloperRole: true; the switch must override that guess.
+    const models = modelsOf({
+      'strict-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://relay.example/v1',
+        compat: { supportsDeveloperRole: false },
+        models: [{ id: 'glm-5.3', reasoningEfforts: { off: null, high: 'high' } }],
+      },
+    }, 'strict-gateway')
+
+    expect((models.get('glm-5.3')?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(false)
+  })
+
+  it('lets a model-level supportsDeveloperRole win over the route switch', () => {
+    const models = modelsOf({
+      'mixed-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://relay.example/v1',
+        compat: { supportsDeveloperRole: false },
+        models: [
+          { id: 'strict', reasoningEfforts: { off: null, high: 'high' } },
+          { id: 'lenient', compat: { supportsDeveloperRole: true } },
+        ],
+      },
+    }, 'mixed-gateway')
+
+    expect((models.get('strict')?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(false)
+    expect((models.get('lenient')?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(true)
+  })
+
+  it('rejects a model-level supportsDeveloperRole on a non-openai-completions protocol', () => {
+    expect(() => resolveProfiles({
+      anthropic: {
+        models: [{ id: 'claude-sonnet-4-5', compat: { supportsDeveloperRole: false } }],
+      },
+    })).toThrow(/exist only on openai-completions/)
   })
 })
 

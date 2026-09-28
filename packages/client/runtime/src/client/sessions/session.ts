@@ -31,6 +31,42 @@ import { SessionQueueMirror } from './queue-mirror.ts'
 /** Messages requested per history page. */
 export const PAGE_MESSAGES = 50
 
+/**
+ * Resident event ceiling for one session window (see
+ * {@link Session.evictOverBudget}). Bounds the per-event object graph — every
+ * resident event also holds a Match, so the count costs far more than the sum of
+ * its payloads — where {@link RESIDENT_SIZE_BUDGET} bounds payload bulk.
+ *
+ * Sized well above a long working session's tail: measured history pages hold
+ * 667–975 events (~1MB) each, so this retains roughly twenty pages of scrollback.
+ */
+export const RESIDENT_EVENT_BUDGET = 20_000
+
+/**
+ * Resident serialized-character ceiling for one session window, the payload
+ * companion to {@link RESIDENT_EVENT_BUDGET}.
+ *
+ * Sized so a few large tool results or long compaction summaries cannot pin the
+ * window resident on their own: thirty-two of the measured ~1MB history pages.
+ */
+export const RESIDENT_SIZE_BUDGET = 32 * 1024 * 1024
+
+/**
+ * Slack below each budget that an eviction pass drains to, i.e. an over-budget
+ * window is cut back to half its ceiling.
+ *
+ * Evicting rebuilds every derived Context from the survivors, costing one Match
+ * per resident event. Draining to half amortizes that rebuild over the same
+ * number of appends the window then regrows by — two Matches per appended event
+ * at the ceiling — where a window parked exactly at its budget would rebuild on
+ * every single append. A larger retained window is the price; the ceiling still
+ * bounds it.
+ */
+export const RESIDENT_EVENT_SLACK = 10_000
+
+/** Serialized-character slack; see {@link RESIDENT_EVENT_SLACK}. */
+export const RESIDENT_SIZE_SLACK = 16 * 1024 * 1024
+
 /** Manager-owned observers of a Session object's local state edges. */
 export interface SessionOptions {
   /** Catalog-discovered address selecting non-activating subagent transport. */
@@ -70,6 +106,9 @@ export class Session implements SessionFace {
   private views: (ToolEventView | undefined)[] = []
   private baseSeq = 0
   private hasMore = false
+  /** Running serialized size of the resident window, maintained incrementally so
+   *  the append hot path never scans `events` to measure it. */
+  private residentSize = 0
   private openState: OpenState = 'cold'
   private openError: RpcError | null = null
   private openPromise: Promise<void> | null = null
@@ -397,6 +436,7 @@ export class Session implements SessionFace {
       }
       this.events = [...older.map(e => e.event), ...this.events]
       this.views = [...older.map(e => e.view), ...this.views]
+      for (const entry of older) this.residentSize += eventSize(entry.event)
       /* v8 ignore next -- the ?? arm needs older[0] undefined, but the empty-page branch above already returned. */
       this.baseSeq = older[0]?.event.seq ?? this.baseSeq
       this.hasMore = result.value.hasMore
@@ -426,6 +466,7 @@ export class Session implements SessionFace {
     this.openError = null
     this.events = []
     this.views = []
+    this.residentSize = 0
     this.baseSeq = 0
     // Superseded, not settled: the baseline replay re-sends still-pending requested frames verbatim
     // (same rpcId), re-minting fresh waits; a stale reference's respond() still reaches the host.
@@ -653,6 +694,7 @@ export class Session implements SessionFace {
   private installWindow(entries: HistoryEntry[], hasMore: boolean, projections?: ProjectionsBaseline): void {
     this.events = entries.map(e => e.event)
     this.views = entries.map(e => e.view)
+    this.residentSize = this.events.reduce((total, event) => total + eventSize(event), 0)
     this.baseSeq = this.events[0]?.seq ?? 0
     this.hasMore = hasMore
     if (this.events.some(event => event.type === 'turn/start')) this.firstPromptPendingTurn = false
@@ -670,9 +712,13 @@ export class Session implements SessionFace {
     if (tailSeq !== null && event.seq <= tailSeq) return 'none' // replay overlap, drop
     this.events.push(event)
     this.views.push(view)
+    this.residentSize += eventSize(event)
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     const queueChanged = this.queueMirror.acceptDurable(event)
     const publication = this.conversation.append({ event, view })
+    // A budget pass rebuilds the window, which is never a weaker publication than
+    // the append that triggered it.
+    if (this.evictOverBudget()) return 'immediate'
     return queueChanged ? 'immediate' : publication
   }
 
@@ -726,6 +772,99 @@ export class Session implements SessionFace {
   private windowTailSeq(): number | null {
     const tail = this.events[this.events.length - 1]
     return tail === undefined ? null : tail.seq
+  }
+
+  /**
+   * Drop oldest resident events until the window is back inside its budget.
+   *
+   * This is the bound on window growth that needs no user action: the live
+   * append path grows the window for as long as a session streams, so without
+   * it a long session retains every event it has ever seen.
+   *
+   * Deliberately NOT run from `loadOlder`: the page a reader just requested is
+   * the oldest resident material, so a budget pass there would evict the page it
+   * just fetched, raise `baseSeq` onto it, and make the next page-up refetch that
+   * same range forever.
+   *
+   * Runs as one operation across the raw arrays, the baseSeq/hasMore metadata,
+   * and the assembler's indexes, so no observer sees a window whose derived
+   * Contexts disagree with its events. Evicted events stay durable and
+   * re-fetchable: the cut raises `hasMore` rather than shrinking reachable
+   * history.
+   *
+   * A cut never lands inside a Context. The assembler publishes a Context only
+   * once its first Match is present, so dropping a start while keeping a later
+   * Match would leave an unpublishable start-less Context that accumulates
+   * without ever rendering. The boundary therefore comes from the assembler,
+   * which answers with the largest Context-safe sequence at or below the cut the
+   * budgets asked for. The retained side is always the live tail, so a running
+   * turn is never evicted.
+   * @returns whether anything was evicted (callers must then publish immediately).
+   */
+  private evictOverBudget(): boolean {
+    // Trigger at the budget, drain to budget-minus-slack: the gap is the
+    // hysteresis that keeps a window at the ceiling from rebuilding per event.
+    const keepEvents = RESIDENT_EVENT_BUDGET - RESIDENT_EVENT_SLACK
+    const sizeTarget = RESIDENT_SIZE_BUDGET - RESIDENT_SIZE_SLACK
+    const overEvents = this.events.length > RESIDENT_EVENT_BUDGET
+    const overSize = this.residentSize > RESIDENT_SIZE_BUDGET
+    if (!overEvents && !overSize) return false
+    // The older cut wins: whichever budget is exceeded can only be satisfied by
+    // dropping everything above the deeper index.
+    const cut = Math.max(
+      overEvents ? this.events.length - keepEvents : 0,
+      overSize ? this.sizeCutIndex(sizeTarget) : 0,
+    )
+    const event = this.events[cut]
+    /* v8 ignore next -- index guard: `cut` is at most `length - 1`, since sizeCutIndex clamps and the event cut keeps the newest. */
+    if (event === undefined) return false
+    const boundary = this.conversation.evictionBoundary(event.seq)
+    if (boundary === null) return false
+    const firstKept = this.events.findIndex(event => event.seq >= boundary)
+    if (firstKept <= 0) return false // nothing droppable: the assembler kept the whole window
+    for (let index = 0; index < firstKept; index++) {
+      const evicted = this.events[index]
+      /* v8 ignore next -- index guard: the loop bound is this.events.length. */
+      if (evicted !== undefined) this.residentSize -= eventSize(evicted)
+    }
+    this.events = this.events.slice(firstKept)
+    this.views = this.views.slice(firstKept)
+    // The window's low end moved up, so the dropped range is now "older
+    // history" — reachable through loadOlder rather than lost.
+    this.baseSeq = boundary
+    this.hasMore = true
+    this.conversation.replaceWindow(this.events.map((event, index) => {
+      /* v8 ignore next -- index alignment: `views` is maintained parallel to `events` by every writer. */
+      return { event, view: this.views[index] }
+    }), this.hasMore)
+    return true
+  }
+
+  /**
+   * Lowest index whose suffix fits the size target, clamped to keep the newest
+   * event resident.
+   *
+   * This walk runs only when the size budget is already exceeded (the caller's
+   * O(1) check against {@link Session.residentSize}), never on every append.
+   * @param sizeTarget - serialized-character target an eviction pass drains to.
+   * @returns the index to cut at; the newest index when a single event exceeds the target.
+   */
+  private sizeCutIndex(sizeTarget: number): number {
+    const newest = this.events.length - 1
+    let chars = 0
+    let cut = newest
+    for (let index = newest; index >= 0; index--) {
+      const event = this.events[index]
+      /* v8 ignore next -- index guard: `index` is a valid index of `events`. */
+      if (event === undefined) break
+      const next = chars + eventSize(event)
+      // Adding this event would exceed the target, so the suffix below it is the
+      // largest one that fits.
+      if (next > sizeTarget) break
+      chars = next
+      cut = index
+    }
+    return cut
   }
 
   private buildSnapshot(): ConversationSnapshot {
@@ -782,6 +921,11 @@ export class Session implements SessionFace {
 /** Convert one wire history row into the assembler's transport-neutral input. */
 function conversationInput(entry: HistoryEntry): ConversationEventInput {
   return { event: entry.event, view: entry.view }
+}
+
+/** Retained-size estimate for one resident event: serialized characters, the unit of the size budget. */
+function eventSize(event: SessionEvent): number {
+  return JSON.stringify(event).length
 }
 
 /** A generic command row alone remains control-plane content; every other visible Chat Node activates the conversation. */

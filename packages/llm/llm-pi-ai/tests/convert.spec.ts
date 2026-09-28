@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { createUserMessage, CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { toPiContext } from '../src/context.ts'
@@ -785,6 +785,80 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'HTTP 400: invalid input: temperature exceeds maximum allowed value',
     }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+    // 402 Payment Required with no body: the balance behind the gateway is
+    // spent; the attempt fails identically every time, so this is quota, not a
+    // retriable transient. (Real production wording: relay gateways answer the
+    // bare status with an empty body.)
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: '402 status code (no body)' })))
+      .toMatchObject({ kind: 'error', failure: { code: QUOTA_EXCEEDED_CODE } })
+    // 408 Request Timeout: the plain status names the transient timeout class
+    // that OpenAI, Anthropic, and Google SDKs all retry.
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: '408 status code (no body)' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+    // A rate limit that announces a far-future reset horizon is a quota wall:
+    // waiting it out inside one request's retry loop cannot succeed.
+    // (Real production wording from a subscription-conversion gateway; the
+    // horizon is years ahead of any test clock.)
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '429: {"message":"{\\"code\\":6004,\\"msg\\":\\"您的使用量已超出频率限制，将在 2099-01-01 00:00:00 UTC+8 重置，您也可以切换其他模型继续使用。\\",\\"requestId\\":\\"x\\"}","type":"soft_rate"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: QUOTA_EXCEEDED_CODE } })
+    // A past reset horizon (clock-dependent; the fixture message is frozen) and
+    // a horizon-free rate limit stay transient.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '429: {"message":"{\\"code\\":6004,\\"msg\\":\\"您的使用量已超出频率限制，将在 2000-01-01 00:00:00 UTC+8 重置\\"}","type":"soft_rate"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT' } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'OpenAI API error (429): {"message":"router in-flight request budget reached","type":"upstream_error"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT' } })
+  })
+
+  // Regression table over real production failure texts gathered from one
+  // long-running multi-gateway session (650 retries across 11 providers).
+  // Every row is a verbatim failure message; the expected code is the
+  // routable class the retry policy acts on. Texts carrying an absolute reset
+  // timestamp are clock-dependent and live in the explicit tests above.
+  it.each([
+    ['Connection error.', 'TRANSPORT'],
+    ['terminated', 'TRANSPORT'],
+    ['ws_close: upstream connection reset without close handshake; please retry', 'TRANSPORT'],
+    ['Anthropic stream ended before message_stop', 'TRANSPORT'],
+    ['OpenAI Responses stream ended before a terminal response event', 'TRANSPORT'],
+    ['Stream ended without finish_reason', 'TRANSPORT'],
+    ['OpenAI API error (503): {"message":"Service request capacity is temporarily full. Please retry later.","type":"upstream_error"}', 'SERVER'],
+    ['OpenAI API error (502): 502 status code (no body)', 'SERVER'],
+    ['OpenAI API error (520): 520 status code (no body)', 'SERVER'],
+    ['502 <html>\n<head><title>502 Bad Gateway</title></head>', 'SERVER'],
+    ['503: {"message":"Service temporarily unavailable","type":"api_error"}', 'SERVER'],
+    ['server_is_overloaded: Our servers are currently overloaded. Please try again later.', 'SERVER'],
+    ['OpenAI API error (500): 500 <html>\n<head><title>500 Internal Server Error</title></head>', 'SERVER'],
+    ['OpenAI API error (503): {"message":"kernel dispatch failed before output","type":"server_error"}', 'SERVER'],
+    ['server_error: rv_blocked: temporary response validation failure; retry your request.', 'PI_AI_ERROR'],
+    ['server_error: rv_no_progress: temporary upstream response made no progress; retry your request only if the client can safely do so.', 'PI_AI_ERROR'],
+    ['server_error: rv_shape_invalid: temporary response validation failure; retry your request.', 'PI_AI_ERROR'],
+    ['kernel_event_source_unavailable: kernel event source lost: cause=kernel_source_unavailable', 'PI_AI_ERROR'],
+    ['upstream_error: Upstream service temporarily unavailable', 'PI_AI_ERROR'],
+    ['OpenAI API error (429): {"message":"router in-flight request budget reached","type":"upstream_error","param":"","code":"router_overloaded"}', 'RATE_LIMIT'],
+    ['429 status code (no body)', 'RATE_LIMIT'],
+    ['429: {"message":"Error code: 429 - {\'error\': {\'code\': \'tpm_rate_limit_exceeded\', \'message\': \'Rate limit reached for TPM\'}}"}', 'RATE_LIMIT'],
+    ['dispatch_queue_timeout: request timed out in the dispatch queue before account selection', 'TIMEOUT'],
+    ['dispatch_queue_timeout: Request queue wait expired before dispatch completed; no account-selection followed.', 'TIMEOUT'],
+    ['pi-ai stream idle timeout after 300000ms', 'TIMEOUT'],
+    ['kernel_unavailable: no serving account became available before timeout', 'TIMEOUT'],
+    // pi-ai's Cerebras heuristic (/^4(?:00|13)\s*(?:status code)?\s*\(no body\)/)
+    // claims this wording as context overflow before our classifier runs, so
+    // production sessions recorded it as CONTEXT_WINDOW_EXCEEDED — keep that.
+    ['400 status code (no body)', 'CONTEXT_WINDOW_EXCEEDED'],
+    ['400 {"error":{"message":"previous_response_id is not available for this user","type":"invalid_request_error"}}', 'INVALID_REQUEST'],
+    ['400: {"message":"* contents[2].parts[0].function_response.name: Name cannot be empty.","status":"INVALID_ARGUMENT"}', 'INVALID_REQUEST'],
+    ['402 status code (no body)', 'QUOTA'],
+    ['HTTP 401: bad key', 'AUTH'],
+    ['403 status code (no body)', 'AUTH'],
+  ])('classifies production failure text %j as %j', (errorMessage, expected) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toMatchObject({ kind: 'error', failure: { code: expected } })
   })
 
   it.each([

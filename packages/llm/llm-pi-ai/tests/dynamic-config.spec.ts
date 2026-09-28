@@ -119,6 +119,38 @@ describe('request-level dynamic profiles', () => {
     expect(removed.finish).toMatchObject({ kind: 'error', failure: { code: 'NO_ADAPTER' } })
   })
 
+  it('stops serving a disabled profile without losing it, and serves it again when re-enabled', async () => {
+    const dir = await home()
+    await writeFile(join(dir, '.credentials.yaml'), 'PI_LIVE_KEY: live-key\n', { mode: 0o600 })
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await boot(dir, {
+      providers: { deepseek: { apiKeyEnv: 'PI_LIVE_KEY', baseURL: server.url } },
+    })
+
+    expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['deepseek'])
+
+    // Disabling keeps the profile — key, endpoint, models — and only takes the
+    // route out of service.
+    await ctx.settings.update(NS, {
+      providers: { deepseek: { enabled: false, apiKeyEnv: 'PI_LIVE_KEY', baseURL: server.url } },
+    })
+    expect(ctx.llm.listProviders()).toEqual([])
+    const refused = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })
+    expect(refused.finish).toMatchObject({ kind: 'error', failure: { code: 'NO_ADAPTER' } })
+    // Still on the settings page: a disabled route must stay editable.
+    expect(ctx.llm.listConfigurableProviders()).toContainEqual(expect.objectContaining({ provider: 'deepseek' }))
+
+    // Re-enabling restores the same route and its credential, with no rewrite
+    // of the fields disabling left alone.
+    await ctx.settings.update(NS, {
+      providers: { deepseek: { enabled: true, apiKeyEnv: 'PI_LIVE_KEY', baseURL: server.url } },
+    })
+    expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['deepseek'])
+    const served = await assemble(ctx, { provider: 'deepseek', model: 'deepseek-v4-flash', messages: [] })
+    expect(served.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(server.headers[0]?.authorization).toBe('Bearer live-key')
+  })
+
   it('rotates the per-request credential referenced by apiKeyEnv', async () => {
     vi.stubEnv('PI_DYNAMIC_KEY', '')
     const dir = await home()

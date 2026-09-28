@@ -117,6 +117,41 @@ export async function removeProviderProfile(
 }
 
 /**
+ * Switch one provider route on or off. A disabled route keeps its whole
+ * profile — key, endpoint, models — and only stops registering, so it leaves
+ * every model selector while staying on this page. Enabling clears the field
+ * instead of writing `true`: the schema default already means enabled, and
+ * leaving an override behind would keep the route on even if the composition
+ * base later disables it.
+ * @param api - the settings wire face.
+ * @param controller - the page store to refresh.
+ * @param target - the provider's settings address.
+ * @param enabled - the requested state.
+ * @returns the failure message, or undefined once the write and reload landed.
+ */
+export async function setProviderEnabled(
+  api: Pick<IApiClient, 'settings'>,
+  controller: ModelsSettingsStore,
+  target: { settingsNs: string; settingsPath: readonly string[] },
+  enabled: boolean,
+): Promise<string | undefined> {
+  const path = [...target.settingsPath, 'enabled']
+  try {
+    const response = await api.settings.mutate({
+      ns: target.settingsNs,
+      ops: [enabled ? { op: 'unset', path } : { op: 'set', path, value: false }],
+    })
+    if (!response.result.ok) return response.result.error.message
+  } catch (error) {
+    // The transport rejected rather than answering; the caller must be able to
+    // retry the idempotent operation instead of the row silently staying.
+    return messageOf(error)
+  }
+  await controller.load()
+  return undefined
+}
+
+/**
  * Whether a whole-section provider still needs its first key: an unconfigured
  * credential opens the setup card instead of showing a row. This is the
  * first-run posture alone — a user who can already reach some provider gets an
@@ -185,6 +220,37 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
   const [savedTarget, setSavedTarget] = useState<ProviderIdentity | undefined>(undefined)
   const [declaring, setDeclaring] = useState(false)
   const [dismissedSetup, setDismissedSetup] = useState<ReadonlySet<string>>(() => new Set())
+  const [toggling, setToggling] = useState<ReadonlySet<string>>(() => new Set())
+  const [toggleFailure, setToggleFailure] = useState<{ provider: string; message: string } | undefined>(undefined)
+
+  /**
+   * Flip one provider's enabled state. The in-flight set is keyed by route so
+   * a second click on the same row is ignored while its write is out, without
+   * blocking the other rows. A refused write is shown on the row: the switch
+   * would otherwise spring back with nothing said, and the page would claim a
+   * change the host never stored.
+   */
+  const toggleEnabled = (row: ProviderRow): void => {
+    const provider = row.entry.provider
+    if (row.enabled === undefined || toggling.has(provider)) return
+    setToggling(previous => new Set([...previous, provider]))
+    setSavedTarget(undefined)
+    setToggleFailure(undefined)
+    void setProviderEnabled(api, controller, targetOf(row), !row.enabled)
+      .then((failure) => {
+        if (failure !== undefined) setToggleFailure({ provider, message: failure })
+      })
+      // The reload may reject on its own; that is a failure of this toggle just
+      // as a refused write is, so it lands on the same row.
+      .catch((error: unknown) => { setToggleFailure({ provider, message: messageOf(error) }) })
+      .then(() => {
+        setToggling((previous) => {
+          const next = new Set(previous)
+          next.delete(provider)
+          return next
+        })
+      })
+  }
 
   const announceSaved = (target: ProviderIdentity): void => {
     // Announced only once the refreshed directory is in the snapshot the
@@ -310,8 +376,10 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
           const credentialMissing = !credentialConfigured
             && row.apiKeyEnv !== undefined
             && row.credential?.configured === false
+          const enabled = row.enabled !== false
+          const toggleDisabled = row.enabled === undefined || !state.writable || toggling.has(row.entry.provider)
           return (
-            <li key={row.entry.provider} className={styles['rowCard']}>
+            <li key={row.entry.provider} className={styles['rowCard']} data-disabled={!enabled || undefined}>
               <div className={styles['rowHead']}>
                 <span className={styles['rowIdentity']}>
                   <span className={styles['rowName']}>{row.entry.displayName}</span>
@@ -342,6 +410,18 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                       : null}
                 </span>
                 <span className={styles['rowActions']}>
+                  <button
+                    type="button"
+                    className={enabled ? styles['enabledToggle'] : styles['disabledToggle']}
+                    role="switch"
+                    aria-checked={enabled}
+                    aria-label={providerCopy(enabled ? t('disableProvider') : t('enableProvider'), target)}
+                    title={enabled ? t('disableHint') : t('enableHint')}
+                    disabled={toggleDisabled}
+                    onClick={() => { toggleEnabled(row) }}
+                  >
+                    {enabled ? t('enabled') : t('disabled')}
+                  </button>
                   <button
                     type="button"
                     className={styles['secondaryButton']}
@@ -377,6 +457,9 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
                     : null}
                 </span>
               </div>
+              {toggleFailure?.provider === row.entry.provider
+                ? <p className={styles['error']} role="alert">{toggleFailure.message}</p>
+                : null}
               {open
                 ? renderProviderEditor({
                   target,

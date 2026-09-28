@@ -92,7 +92,15 @@ function npmPackageOf(id: string): string | undefined {
 export default defineConfig({
   plugins: [rejectStandaloneServe(), react()],
   build: {
-    sourcemap: true,
+    // 本机天锐（Tipray）透明加密会破坏 node→esbuild.exe 服务管道：大文件（如
+    // 1.5MB 的 vendor chunk）经 renderChunk 喂给 esbuild 时首字节被注入 0x88，
+    // esbuild 直接报 "Unexpected \"\\x88\""（磁盘产物本身是干净的，坏的是管道）。
+    // 规避：跳过 renderChunk 的 esbuild 通道——target 固定 esnext、不做 esbuild
+    // 压缩、不出 sourcemap。这是 localhost 桌面应用，未压缩 bundle 无实际代价；
+    // terser（纯 node 进程内压缩，不走管道）未安装，需要压缩时再引入。
+    target: 'esnext',
+    minify: false,
+    sourcemap: false,
     rollupOptions: {
       output: {
         // Output layout: the two main chunks stay at assets/ root; lazy

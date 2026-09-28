@@ -150,6 +150,35 @@ describe('request-level dynamic configuration', () => {
     expect(observed).toEqual([['deepseek-official']])
   })
 
+  it('unregisters a disabled route and restores it, keeping the profile intact', async () => {
+    const dir = await home()
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    vi.stubEnv('DEEPSEEK_API_KEY', 'live-key')
+    const { ctx } = await boot(dir, { baseURL: server.url })
+
+    const observed: string[][] = []
+    ctx.on('llm/adapters-updated', () => {
+      observed.push(ctx.llm.listProviders().map(provider => provider.id))
+    })
+
+    expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
+
+    await ctx.settings.update(NS, { enabled: false })
+    expect(ctx.llm.listProviders()).toEqual([])
+    // The page must still list it, or a disabled route could never be
+    // switched back on.
+    expect(ctx.llm.listConfigurableProviders()).toContainEqual(
+      expect.objectContaining({ provider: 'deepseek-official' }),
+    )
+    // In place: the swap goes through `replace`, so no observer ever sees an
+    // empty registry between the release and the re-registration.
+    expect(observed).toEqual([[]])
+
+    await ctx.settings.update(NS, { enabled: true })
+    expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
+    expect(observed).toEqual([[], ['deepseek-official']])
+  })
+
   it('keeps the last good options when a settings snapshot fails beyond-schema validation', async () => {
     const dir = await home()
     const { ctx } = await boot(dir, { baseURL: 'http://127.0.0.1:1' })

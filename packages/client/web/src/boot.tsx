@@ -31,6 +31,12 @@
  * Composition lives in the host graph; the shell makes zero composition
  * decisions (the app-shell assembly is itself a graph entry, the only
  * shell-own module registered with the module system).
+ *
+ * The kernel also owns the page's error reporting channel
+ * ({@link installClientErrorReporting}): browser exceptions, unhandled
+ * rejections, and resource load failures are POSTed to
+ * `/client-errors/report`, whose host half is the client-errors plugin
+ * package. It lives here because it must run even when plugin loading fails.
  */
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -58,6 +64,119 @@ export type BootSeams = Pick<ClientModuleSystemOptions, 'loadBundle'>
  * twice.
  */
 const MODULES_ID = '@deepseek-ai/dsh-client-modules'
+
+/**
+ * Report endpoint literal, duplicated from
+ * `packages/client/client-errors/src/endpoint.ts`: the shell self-sufficiency
+ * rule forbids value-importing a plugin package, and this channel must exist
+ * even when every plugin fails to load. The client-errors package's sync spec
+ * (`packages/client/client-errors/tests/endpoint-sync.client.spec.ts`) reads
+ * this file and asserts the literal stays in sync.
+ */
+const CLIENT_ERRORS_ENDPOINT = '/client-errors/report'
+
+/** Install-once guard: a second call is a no-op, so the listeners never stack. */
+let clientErrorReportingInstalled = false
+
+/** Reports dropped inside this window when they repeat the same kind, message, and source. */
+const CLIENT_ERROR_DEDUPE_MS = 5_000
+
+/** Reports sent per window; the host enforces its own budget, this only bounds the page's. */
+const CLIENT_ERROR_MAX_PER_MINUTE = 20
+
+/** Dedupe window length. */
+const CLIENT_ERROR_RATE_WINDOW_MS = 60_000
+
+/** User-agent characters sent with a report. */
+const CLIENT_ERROR_MAX_UA_CHARS = 200
+
+/**
+ * Install the page's error reporting listeners: `error` (resource failures
+ * only), `window.onerror` (script errors), and `unhandledrejection`. Each
+ * listener posts one JSON report to {@link CLIENT_ERRORS_ENDPOINT} — the host
+ * half is `packages/client/client-errors`, which bounds, validates, and logs it
+ * — so a browser failure such as a failed history fetch is diagnosable after
+ * the fact.
+ *
+ * The listeners live here, not in the client-errors package's browser half,
+ * because they must run even when plugin loading fails. Nothing in this path
+ * may throw: a reporting channel that fails the page it reports on is worse
+ * than no channel.
+ */
+export function installClientErrorReporting(): void {
+  if (clientErrorReportingInstalled) return
+  clientErrorReportingInstalled = true
+
+  // Reentrancy guard: one report in flight at a time. A page failing in a loop
+  // would otherwise queue a request per failure while the first is unanswered.
+  let inFlight = false
+  let windowStartedAt = 0
+  let sentInWindow = 0
+  const recent = new Map<string, number>()
+
+  const send = (report: Record<string, unknown>): void => {
+    if (inFlight) return
+    const now = Date.now()
+    if (now - windowStartedAt >= CLIENT_ERROR_RATE_WINDOW_MS) {
+      windowStartedAt = now
+      sentInWindow = 0
+      recent.clear()
+    }
+    const source = report['source'] as { url?: string } | undefined
+    const key = `${String(report['kind'])}\u0000${String(report['message'])}\u0000${source?.url ?? ''}`
+    const last = recent.get(key)
+    if (last !== undefined && now - last < CLIENT_ERROR_DEDUPE_MS) return
+    if (sentInWindow >= CLIENT_ERROR_MAX_PER_MINUTE) return
+    recent.set(key, now)
+    sentInWindow += 1
+    inFlight = true
+    void fetch(CLIENT_ERRORS_ENDPOINT, {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...report,
+        href: location.href,
+        ts: Date.now(),
+        ua: navigator.userAgent.slice(0, CLIENT_ERROR_MAX_UA_CHARS),
+      }),
+    })
+      .catch(() => {
+        // The report channel is best-effort: a failed post is unreportable by
+        // construction, and logging it here would recurse.
+      })
+      .finally(() => { inFlight = false })
+  }
+
+  // Capture phase catches resource failures, which do not bubble; script
+  // errors are skipped here because window.onerror owns them (reporting both
+  // would double every script failure).
+  window.addEventListener('error', (event: Event) => {
+    const target = event.target
+    if (target === null || target === window) return
+    const element = target as Element
+    send({
+      kind: 'resource',
+      tag: element.tagName,
+      message: element.getAttribute('src') ?? element.getAttribute('href') ?? location.href,
+    })
+  }, true)
+
+  window.onerror = (message, source, lineno, colno, error) => {
+    const report: Record<string, unknown> = { kind: 'error', message: String(message), source: { url: source, line: lineno, col: colno } }
+    if (error?.stack !== undefined) report['stack'] = error.stack
+    send(report)
+    // Returning false leaves the default console handling in place.
+    return false
+  }
+
+  window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
+    const reason = event.reason as { message?: unknown } | undefined
+    const report: Record<string, unknown> = { kind: 'unhandledrejection', message: String(reason?.message ?? reason) }
+    if (reason instanceof Error && reason.stack !== undefined) report['stack'] = reason.stack
+    send(report)
+  })
+}
 
 /**
  * The web shell kernel: mounts the loading page into a DOM element and runs
@@ -95,6 +214,10 @@ export class AppWebEntry {
    * @returns resolves once the UI settled or the failure report rendered.
    */
   async run(): Promise<void> {
+    // First statement: the page's error reporting channel must be armed before
+    // any other boot machinery can fail.
+    installClientErrorReporting()
+
     this.manifest = parseBootManifest((globalThis as DshWindow).__DSH_BOOT__)
 
     this.modules = new ClientModuleSystem({

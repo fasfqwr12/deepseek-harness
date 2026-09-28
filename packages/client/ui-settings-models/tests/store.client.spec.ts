@@ -98,6 +98,45 @@ describe('ModelsSettingsStore', () => {
     expect(state.namespaces.get('llm-pi-ai')?.ns).toBe('llm-pi-ai')
   })
 
+  it('reads the resolved enabled flag, absent meaning on', async () => {
+    const namespaces = [
+      {
+        ns: 'llm-deepseek',
+        schema: {},
+        // The composition base disabled this route and the user layer never
+        // spoke: the resolved section is what counts, so the row must read off.
+        value: { enabled: false, apiKeyEnv: 'DEEPSEEK_API_KEY' },
+        user: {},
+        base: { enabled: false },
+        applies: 'live' as const,
+        secrets: [],
+        revision: 0,
+      },
+      {
+        ns: 'llm-pi-ai',
+        schema: {},
+        value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' }, anthropic: { enabled: false } } },
+        user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' }, anthropic: { enabled: false } } },
+        applies: 'live' as const,
+        secrets: [],
+        revision: 0,
+      },
+    ] as never
+    const { face } = api({
+      describeSettings: () => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: namespaces as never })),
+    })
+    const store = new ModelsSettingsStore(face as never)
+    await store.load()
+    const byProvider = new Map(store.store.getSnapshot().rows.map(row => [row.entry.provider, row]))
+    expect(byProvider.get('deepseek-official')?.enabled).toBe(false)
+    // No `enabled` key at all resolves to the schema default: on.
+    expect(byProvider.get('openai')?.enabled).toBe(true)
+    expect(byProvider.get('anthropic')?.enabled).toBe(false)
+    // An unconfigured row has nothing to read, so the toggle stays disabled
+    // rather than guessing a state the host never resolved.
+    expect(byProvider.get('ghost')?.enabled).toBeUndefined()
+  })
+
   it('degrades the credential badge, not the page, when the credential domain fails', async () => {
     const { face } = api({ describeCredentials: () => Promise.resolve(fail('no provider')) })
     const store = new ModelsSettingsStore(face)

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/proposed/bug-fix/2026-09-24-retry-classifier-quota-shaped-failures.md
+2026-09-24-retry-classifier-quota-shaped-failures.md: 34eb1362901816067c3df2fd0bea444b7861596a
+2026-09-24-retry-classifier-quota-shaped-failures.zh.md: c226cd9975a0ec8d37ae1236362e57ac6b6c0957
