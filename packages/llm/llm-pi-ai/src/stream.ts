@@ -105,7 +105,18 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     case 'stop':
       // A terminal stop that produced no content blocks is a degenerate
       // provider completion, not a successful (empty) assistant message.
-      if (message.content.length === 0) {
+      //
+      // Reasoning-only counts as degenerate too: a stream that opened just a
+      // thinking block and then stopped with `content` empty and no tool call
+      // did no work the caller can use. Observed in the wild at a measurable
+      // rate (0.5% of calls on one gateway, 15.8% on another) — the client just
+      // saw the turn end with nothing, which is indistinguishable from a stall
+      // and left no error anywhere in the logs. Treating it as EMPTY_RESPONSE
+      // routes it into the ordinary bounded retry policy instead.
+      //
+      // Block type is `thinking` (ThinkingContent), NOT `reasoning` — the
+      // session event names the block `reasoning`, which is a different layer.
+      if (message.content.length === 0 || message.content.every(block => block.type === 'thinking')) {
         return {
           kind: 'error',
           failure: {

@@ -740,9 +740,38 @@ describe('mapStopReason / mapUsage', () => {
     })
   })
 
-  it('keeps a thinking-only stop successful (any block counts as content)', () => {
+  // 行为变更（原先断言 thinking-only 也算成功，见 git 历史）。
+  //
+  // 原设计把任何块都当内容，于是「只开了 thinking 块就 stop」被判定为成功。
+  // 实测证明这对 agent 场景有害：模型深度思考后直接停住、正文为空、也没有
+  // 工具调用，客户端看到的是一轮什么都没发生的 turn —— 与卡死无法区分，
+  // 且协议上是 200 成功，各处日志都不留痕。
+  //
+  // 实测量级（deepseek-v4.1-flash，开思考 vs 关思考，各 9 次）：
+  //   reasoning_effort=high      空回复 5/9 (55.6%)
+  //   reasoning_effort=low       空回复 4/9 (44.4%)
+  //   thinking: disabled         空回复 0/9 ( 0.0%)
+  // 即「开思考」本身就带来约一半的退化响应，必须有重试兜住。
+  it('classifies a thinking-only stop as EMPTY_RESPONSE so it is retried', () => {
     expect(mapStopReason(assistant({ stopReason: 'stop', content: [{ type: 'thinking', thinking: 'mull' }] })))
-      .toEqual({ kind: 'stop' })
+      .toEqual({
+        kind: 'error',
+        failure: {
+          message: 'model "deepseek-v4-flash" returned a completed response with no content',
+          code: EMPTY_RESPONSE_CODE,
+        },
+      })
+  })
+
+  it('still treats a thinking block followed by real output as success', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'thinking', thinking: 'mull' }, { type: 'text', text: 'answer' }],
+    }))).toEqual({ kind: 'stop' })
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'thinking', thinking: 'mull' }, { type: 'toolCall', id: 'c1', name: 'x', arguments: {} }],
+    }))).toEqual({ kind: 'stop' })
   })
 
   it('defaults the error message when pi-ai omits it', () => {
