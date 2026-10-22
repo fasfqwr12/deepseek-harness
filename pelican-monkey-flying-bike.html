@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>飞行单车 · 猴子 & 鹈鹕</title>
+<style>
+:root{--sp:1;--ink:#eaf2fb;--dim:#9fb4c8;--acc:#ffc247}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:radial-gradient(1200px 700px at 50% 0%,#16263c 0%,#0b1421 70%,#070d16 100%);
+  color:var(--ink);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:22px 16px}
+.wrap{width:min(1180px,100%)}
+.head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:0 4px 10px}
+h1{font-size:20px;margin:0;letter-spacing:1px;font-weight:700}
+h1 span{color:var(--acc)}
+.sub{font-size:12.5px;color:var(--dim);letter-spacing:.4px}
+.card{position:relative;border-radius:18px;overflow:hidden;background:#0e1b2b;
+  box-shadow:0 24px 60px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.07) inset}
+svg#scene{display:block;width:100%;height:auto}
+.bar{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-top:12px}
+button{background:#16293e;color:var(--ink);border:1px solid rgba(255,255,255,.14);border-radius:10px;
+  padding:9px 15px;font-size:13.5px;cursor:pointer;font-family:inherit;transition:.18s}
+button:hover{background:#1f3a55;border-color:rgba(255,194,71,.55);color:#ffe6b0}
+button:active{transform:translateY(1px)}
+button.primary{background:linear-gradient(180deg,#ffce5c,#f0a52c);color:#3a2405;border-color:#ffd98a;font-weight:700}
+.speed{margin-left:auto;font-size:12.5px;color:var(--dim)}
+.speed b{color:var(--acc);font-variant-numeric:tabular-nums}
+.hint{font-size:12px;color:var(--dim);margin-top:8px}
+
+.drift-far  .band-a{animation:driftA calc(260s / var(--sp)) linear infinite}
+.drift-far  .band-b{animation:driftB calc(260s / var(--sp)) linear infinite}
+.drift-slow .band-a{animation:driftA calc(120s / var(--sp)) linear infinite}
+.drift-slow .band-b{animation:driftB calc(120s / var(--sp)) linear infinite}
+.drift-fast .band-a{animation:driftA calc(46s / var(--sp)) linear infinite}
+.drift-fast .band-b{animation:driftB calc(46s / var(--sp)) linear infinite}
+.drift-near .band-a{animation:driftA calc(15s / var(--sp)) linear infinite}
+.drift-near .band-b{animation:driftB calc(15s / var(--sp)) linear infinite}
+.sea-scroll .band-a{animation:driftA calc(7s / var(--sp)) linear infinite}
+.sea-scroll .band-b{animation:driftB calc(7s / var(--sp)) linear infinite}
+@keyframes driftA{from{transform:translateX(0)}to{transform:translateX(-2400px)}}
+@keyframes driftB{from{transform:translateX(2400px)}to{transform:translateX(0)}}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001s!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>&#129418; &times; &#128125; &times; &#128690; <span>&#39134;&#34892;&#21333;&#36710;</span></h1>
+    <span class="sub">&#40657;&#23376;&#39592;&#39540;&#33328;&#65292;&#40657;&#40456;&#22312;&#26426;&#39030;&#36215;&#39592;&#36305;&#36716;&#36710; &middot; &#32431; SVG + SMIL</span>
+  </div>
+  <div class="card"><svg id="scene" viewBox="0 0 1200 700" xmlns="http://www.w3.org/2000/svg" role="img"
+  aria-label="猴子驾驶飞机，鹈鹕在机顶骑自行车">
+<defs>
+  <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1264ad"/><stop offset="0.34" stop-color="#3f9ad9"/>
+    <stop offset="0.62" stop-color="#7fc4ee"/><stop offset="0.84" stop-color="#cbe5f2"/>
+    <stop offset="1" stop-color="#f4e2bd"/>
+  </linearGradient>
+  <radialGradient id="sunGlow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#fff6c9" stop-opacity="0.92"/>
+    <stop offset="0.35" stop-color="#ffe79b" stop-opacity="0.30"/>
+    <stop offset="1" stop-color="#ffe79b" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#46bccb"/><stop offset="0.35" stop-color="#2590ad"/>
+    <stop offset="1" stop-color="#15607c"/>
+  </linearGradient>
+  <linearGradient id="hull" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ffffff"/><stop offset="0.5" stop-color="#eef2f6"/>
+    <stop offset="1" stop-color="#b7c4d1"/>
+  </linearGradient>
+  <linearGradient id="hullShade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#93a6b6"/><stop offset="1" stop-color="#5d7183"/>
+  </linearGradient>
+  <linearGradient id="glass" x1="0" y1="0" x2="0.6" y2="1">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="0.5"/>
+    <stop offset="1" stop-color="#bfe6f7" stop-opacity="0.24"/>
+  </linearGradient>
+  <linearGradient id="beakTop" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#ffd066"/><stop offset="1" stop-color="#ef8a1c"/>
+  </linearGradient>
+  <linearGradient id="beakLow" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#f9a12b"/><stop offset="1" stop-color="#dd5b25"/>
+  </linearGradient>
+  <linearGradient id="fur" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#c08a5f"/><stop offset="1" stop-color="#8a5533"/>
+  </linearGradient>
+  <linearGradient id="bodyG" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dde5ec"/>
+  </linearGradient>
+  <linearGradient id="seaShade" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#0d4f6b" stop-opacity="0.5"/>
+    <stop offset="0.5" stop-color="#0d4f6b" stop-opacity="0"/>
+    <stop offset="1" stop-color="#0d4f6b" stop-opacity="0.5"/>
+  </linearGradient>
+  <symbol id="cloud" viewBox="0 0 200 80">
+    <g fill="#ffffff">
+      <ellipse cx="58" cy="54" rx="44" ry="24"/><ellipse cx="98" cy="34" rx="50" ry="30"/>
+      <ellipse cx="146" cy="52" rx="40" ry="22"/><rect x="48" y="52" width="110" height="24" rx="12"/>
+    </g>
+  </symbol>
+  <symbol id="isle" viewBox="0 0 260 60">
+    <path d="M0 60 Q 40 6 92 22 Q 128 4 176 24 Q 226 10 260 60 Z" fill="#1d7f86"/>
+    <path d="M0 60 Q 60 22 120 34 Q 190 22 260 60 Z" fill="#16666f"/>
+  </symbol>
+  <symbol id="wheel" viewBox="0 0 120 120">
+    <circle cx="60" cy="60" r="52" fill="none" stroke="#2b3a4a" stroke-width="12"/>
+    <circle cx="60" cy="60" r="45" fill="none" stroke="#e6edf3" stroke-width="3"/>
+    <g stroke="#c9d4e0" stroke-width="3">
+      <line x1="60" y1="15" x2="60" y2="105"/><line x1="15" y1="60" x2="105" y2="60"/>
+      <line x1="27" y1="27" x2="93" y2="93"/><line x1="93" y1="27" x2="27" y2="93"/>
+    </g>
+    <circle cx="60" cy="60" r="9" fill="#8fa3b4"/>
+  </symbol>
+</defs>
+
+<rect x="0" y="0" width="1200" height="700" fill="url(#sky)"/>
+<circle cx="1075" cy="92" r="150" fill="url(#sunGlow)"/>
+<circle cx="1075" cy="92" r="46" fill="#fff3c4" opacity="0.95"/>
+
+<g class="drift-far" opacity="0.45"><g class="band-a"><use href="#isle" x="150" y="500" width="182" height="42"/><use href="#isle" x="820" y="500" width="260" height="60"/><use href="#isle" x="1560" y="500" width="221" height="51"/><use href="#isle" x="2180" y="500" width="156" height="36"/></g><g class="band-b"><use href="#isle" x="150" y="500" width="182" height="42"/><use href="#isle" x="820" y="500" width="260" height="60"/><use href="#isle" x="1560" y="500" width="221" height="51"/><use href="#isle" x="2180" y="500" width="156" height="36"/></g></g>
+<g class="drift-slow" opacity="0.85"><g class="band-a"><use href="#cloud" x="1086" y="120" width="245" height="98"/><use href="#cloud" x="1118" y="111" width="212" height="85"/><use href="#cloud" x="443" y="112" width="216" height="87"/><use href="#cloud" x="1903" y="45" width="184" height="74"/><use href="#cloud" x="218" y="160" width="223" height="89"/><use href="#cloud" x="101" y="187" width="250" height="100"/><use href="#cloud" x="1569" y="128" width="170" height="68"/><use href="#cloud" x="36" y="115" width="160" height="64"/></g><g class="band-b"><use href="#cloud" x="1086" y="120" width="245" height="98"/><use href="#cloud" x="1118" y="111" width="212" height="85"/><use href="#cloud" x="443" y="112" width="216" height="87"/><use href="#cloud" x="1903" y="45" width="184" height="74"/><use href="#cloud" x="218" y="160" width="223" height="89"/><use href="#cloud" x="101" y="187" width="250" height="100"/><use href="#cloud" x="1569" y="128" width="170" height="68"/><use href="#cloud" x="36" y="115" width="160" height="64"/></g></g>
+<g class="drift-fast" opacity="0.92"><g class="band-a"><use href="#cloud" x="456" y="271" width="202" height="81"/><use href="#cloud" x="1113" y="305" width="300" height="120"/><use href="#cloud" x="1246" y="339" width="258" height="103"/><use href="#cloud" x="1590" y="308" width="232" height="93"/><use href="#cloud" x="2394" y="399" width="300" height="120"/><use href="#cloud" x="1699" y="284" width="226" height="90"/><use href="#cloud" x="694" y="242" width="291" height="116"/></g><g class="band-b"><use href="#cloud" x="456" y="271" width="202" height="81"/><use href="#cloud" x="1113" y="305" width="300" height="120"/><use href="#cloud" x="1246" y="339" width="258" height="103"/><use href="#cloud" x="1590" y="308" width="232" height="93"/><use href="#cloud" x="2394" y="399" width="300" height="120"/><use href="#cloud" x="1699" y="284" width="226" height="90"/><use href="#cloud" x="694" y="242" width="291" height="116"/></g></g>
+
+<rect x="0" y="556" width="1200" height="144" fill="url(#sea)"/>
+<g class="sea-scroll" fill="none" stroke="#dff6fb" stroke-width="3.4" stroke-linecap="round" opacity="0.7">
+  <g class="band-a"><path d="M 2352.9 604.4 q 12.9 -6 25.7 0 q 12.9 6 25.7 0"/><path d="M 1510.7 658.5 q 16.5 -6 33.0 0 q 16.5 6 33.0 0"/><path d="M 209.1 595.2 q 29.3 -6 58.7 0 q 29.3 6 58.7 0"/><path d="M 1819.3 564.8 q 16.1 -6 32.1 0 q 16.1 6 32.1 0"/><path d="M 242.5 556.5 q 26.2 -6 52.5 0 q 26.2 6 52.5 0"/><path d="M 426.4 627.4 q 19.8 -6 39.6 0 q 19.8 6 39.6 0"/><path d="M 457.6 651.9 q 13.9 -6 27.8 0 q 13.9 6 27.8 0"/><path d="M 1544.9 564.5 q 19.3 -6 38.6 0 q 19.3 6 38.6 0"/><path d="M 510.9 586.3 q 29.5 -6 58.9 0 q 29.5 6 58.9 0"/><path d="M 1928.2 591.2 q 27.9 -6 55.7 0 q 27.9 6 55.7 0"/><path d="M 505.7 604.0 q 27.3 -6 54.6 0 q 27.3 6 54.6 0"/><path d="M 1540.4 562.2 q 29.8 -6 59.6 0 q 29.8 6 59.6 0"/><path d="M 511.8 584.7 q 25.8 -6 51.6 0 q 25.8 6 51.6 0"/><path d="M 789.5 590.1 q 12.9 -6 25.7 0 q 12.9 6 25.7 0"/><path d="M 216.3 630.7 q 16.0 -6 32.0 0 q 16.0 6 32.0 0"/><path d="M 1443.1 600.8 q 19.9 -6 39.8 0 q 19.9 6 39.8 0"/><path d="M 2301.9 616.7 q 22.1 -6 44.3 0 q 22.1 6 44.3 0"/><path d="M 2079.7 574.0 q 14.4 -6 28.7 0 q 14.4 6 28.7 0"/><path d="M 2180.2 664.1 q 16.1 -6 32.2 0 q 16.1 6 32.2 0"/><path d="M 455.5 653.0 q 28.9 -6 57.8 0 q 28.9 6 57.8 0"/><path d="M 471.8 682.9 q 27.8 -6 55.6 0 q 27.8 6 55.6 0"/><path d="M 1448.5 607.8 q 13.4 -6 26.8 0 q 13.4 6 26.8 0"/><path d="M 92.9 684.7 q 15.9 -6 31.8 0 q 15.9 6 31.8 0"/><path d="M 1691.0 584.5 q 26.7 -6 53.5 0 q 26.7 6 53.5 0"/><path d="M 1431.5 589.7 q 14.7 -6 29.5 0 q 14.7 6 29.5 0"/><path d="M 1728.8 557.8 q 15.7 -6 31.5 0 q 15.7 6 31.5 0"/><path d="M 1342.5 669.0 q 22.9 -6 45.7 0 q 22.9 6 45.7 0"/><path d="M 672.5 678.3 q 15.3 -6 30.5 0 q 15.3 6 30.5 0"/><path d="M 39.8 586.2 q 19.7 -6 39.5 0 q 19.7 6 39.5 0"/><path d="M 145.1 573.0 q 18.3 -6 36.6 0 q 18.3 6 36.6 0"/><path d="M 1373.2 566.7 q 18.2 -6 36.4 0 q 18.2 6 36.4 0"/><path d="M 2138.3 687.2 q 23.7 -6 47.3 0 q 23.7 6 47.3 0"/><path d="M 1658.9 631.0 q 14.1 -6 28.2 0 q 14.1 6 28.2 0"/><path d="M 84.2 550.5 q 28.3 -6 56.7 0 q 28.3 6 56.7 0"/><path d="M 1682.3 684.7 q 11.9 -6 23.8 0 q 11.9 6 23.8 0"/><path d="M 1526.8 616.5 q 25.0 -6 50.0 0 q 25.0 6 50.0 0"/><path d="M 765.4 689.9 q 12.9 -6 25.8 0 q 12.9 6 25.8 0"/><path d="M 1310.6 652.7 q 28.2 -6 56.3 0 q 28.2 6 56.3 0"/><path d="M 1769.0 647.9 q 26.2 -6 52.4 0 q 26.2 6 52.4 0"/><path d="M 2196.0 598.0 q 24.2 -6 48.4 0 q 24.2 6 48.4 0"/></g><g class="band-b"><path d="M 2352.9 604.4 q 12.9 -6 25.7 0 q 12.9 6 25.7 0"/><path d="M 1510.7 658.5 q 16.5 -6 33.0 0 q 16.5 6 33.0 0"/><path d="M 209.1 595.2 q 29.3 -6 58.7 0 q 29.3 6 58.7 0"/><path d="M 1819.3 564.8 q 16.1 -6 32.1 0 q 16.1 6 32.1 0"/><path d="M 242.5 556.5 q 26.2 -6 52.5 0 q 26.2 6 52.5 0"/><path d="M 426.4 627.4 q 19.8 -6 39.6 0 q 19.8 6 39.6 0"/><path d="M 457.6 651.9 q 13.9 -6 27.8 0 q 13.9 6 27.8 0"/><path d="M 1544.9 564.5 q 19.3 -6 38.6 0 q 19.3 6 38.6 0"/><path d="M 510.9 586.3 q 29.5 -6 58.9 0 q 29.5 6 58.9 0"/><path d="M 1928.2 591.2 q 27.9 -6 55.7 0 q 27.9 6 55.7 0"/><path d="M 505.7 604.0 q 27.3 -6 54.6 0 q 27.3 6 54.6 0"/><path d="M 1540.4 562.2 q 29.8 -6 59.6 0 q 29.8 6 59.6 0"/><path d="M 511.8 584.7 q 25.8 -6 51.6 0 q 25.8 6 51.6 0"/><path d="M 789.5 590.1 q 12.9 -6 25.7 0 q 12.9 6 25.7 0"/><path d="M 216.3 630.7 q 16.0 -6 32.0 0 q 16.0 6 32.0 0"/><path d="M 1443.1 600.8 q 19.9 -6 39.8 0 q 19.9 6 39.8 0"/><path d="M 2301.9 616.7 q 22.1 -6 44.3 0 q 22.1 6 44.3 0"/><path d="M 2079.7 574.0 q 14.4 -6 28.7 0 q 14.4 6 28.7 0"/><path d="M 2180.2 664.1 q 16.1 -6 32.2 0 q 16.1 6 32.2 0"/><path d="M 455.5 653.0 q 28.9 -6 57.8 0 q 28.9 6 57.8 0"/><path d="M 471.8 682.9 q 27.8 -6 55.6 0 q 27.8 6 55.6 0"/><path d="M 1448.5 607.8 q 13.4 -6 26.8 0 q 13.4 6 26.8 0"/><path d="M 92.9 684.7 q 15.9 -6 31.8 0 q 15.9 6 31.8 0"/><path d="M 1691.0 584.5 q 26.7 -6 53.5 0 q 26.7 6 53.5 0"/><path d="M 1431.5 589.7 q 14.7 -6 29.5 0 q 14.7 6 29.5 0"/><path d="M 1728.8 557.8 q 15.7 -6 31.5 0 q 15.7 6 31.5 0"/><path d="M 1342.5 669.0 q 22.9 -6 45.7 0 q 22.9 6 45.7 0"/><path d="M 672.5 678.3 q 15.3 -6 30.5 0 q 15.3 6 30.5 0"/><path d="M 39.8 586.2 q 19.7 -6 39.5 0 q 19.7 6 39.5 0"/><path d="M 145.1 573.0 q 18.3 -6 36.6 0 q 18.3 6 36.6 0"/><path d="M 1373.2 566.7 q 18.2 -6 36.4 0 q 18.2 6 36.4 0"/><path d="M 2138.3 687.2 q 23.7 -6 47.3 0 q 23.7 6 47.3 0"/><path d="M 1658.9 631.0 q 14.1 -6 28.2 0 q 14.1 6 28.2 0"/><path d="M 84.2 550.5 q 28.3 -6 56.7 0 q 28.3 6 56.7 0"/><path d="M 1682.3 684.7 q 11.9 -6 23.8 0 q 11.9 6 23.8 0"/><path d="M 1526.8 616.5 q 25.0 -6 50.0 0 q 25.0 6 50.0 0"/><path d="M 765.4 689.9 q 12.9 -6 25.8 0 q 12.9 6 25.8 0"/><path d="M 1310.6 652.7 q 28.2 -6 56.3 0 q 28.2 6 56.3 0"/><path d="M 1769.0 647.9 q 26.2 -6 52.4 0 q 26.2 6 52.4 0"/><path d="M 2196.0 598.0 q 24.2 -6 48.4 0 q 24.2 6 48.4 0"/></g>
+</g>
+<rect x="0" y="556" width="1200" height="144" fill="url(#seaShade)" opacity="0.32"/>
+
+<!-- ===================== 飞机 ===================== -->
+<g class="plane-bob">
+  <animateTransform attributeName="transform" type="translate" dur="5.5s" repeatCount="indefinite"
+    values="0 0;0 -10;0 0" calcMode="spline" keyTimes="0;0.5;1"
+    keySplines="0.42 0 0.58 1;0.42 0 0.58 1" data-base="5.5"/>
+ <g class="plane-sway">
+  <animateTransform attributeName="transform" type="rotate" dur="9s" repeatCount="indefinite"
+    values="0 600 380;-1.1 600 380;0 600 380;1.1 600 380;0 600 380" data-base="9"/>
+
+  <!-- 机身 -->
+  <path d="M392 396 C 398 356, 462 320, 556 314 L 800 310 C 862 312, 902 338, 910 370
+           C 916 400, 880 428, 796 434 L 520 436 C 452 434, 390 420, 392 396 Z" fill="url(#hull)"/>
+  <!-- 垂尾 -->
+  <path d="M404 344 L 352 232 L 404 242 L 446 322 Z" fill="url(#hull)" stroke="#9db0c0" stroke-width="2"/>
+  <path d="M392 300 L 366 250 L 396 256 L 420 300 Z" fill="#e2574c" opacity="0.85"/>
+  <!-- 平尾 -->
+  <path d="M404 386 L 286 366 L 288 390 L 398 416 Z" fill="url(#hull)" stroke="#9db0c0" stroke-width="2"/>
+  <!-- 主翼 -->
+  <path d="M540 428 C 556 470, 596 502, 660 512 L 706 508 C 648 486, 600 456, 588 426 Z"
+        fill="url(#hull)" stroke="#9db0c0" stroke-width="2"/>
+  <path d="M548 432 C 566 466, 600 492, 652 504 L 672 502 C 628 482, 594 458, 578 430 Z"
+        fill="#e2574c" opacity="0.7"/>
+  <!-- 描边 + 条纹 -->
+  <path d="M392 396 C 398 356, 462 320, 556 314 L 800 310 C 862 312, 902 338, 910 370
+           C 916 400, 880 428, 796 434 L 520 436 C 452 434, 390 420, 392 396 Z"
+        fill="none" stroke="#93a6b6" stroke-width="2.5"/>
+  <path d="M430 404 C 520 424, 700 424, 856 398" fill="none" stroke="#e2574c" stroke-width="7"
+        stroke-linecap="round" opacity="0.9"/>
+  <text x="700" y="392" font-family="Verdana,DejaVu Sans,sans-serif" font-size="16" font-weight="bold"
+        fill="#6c8093" letter-spacing="3" text-anchor="middle">PELICAN AIR</text>
+  <!-- 舷窗 -->
+  <g fill="#9fc7dd" stroke="#7fa5bd" stroke-width="1.5">
+    <circle cx="452" cy="368" r="7"/><circle cx="488" cy="362" r="7"/><circle cx="524" cy="358" r="7"/>
+    <circle cx="560" cy="355" r="7"/><circle cx="596" cy="353" r="7"/><circle cx="632" cy="351" r="7"/>
+  </g>
+  <!-- 发动机 -->
+  <path d="M905 352 C 936 348, 952 356, 952 372 C 952 390, 934 398, 906 394 Z" fill="url(#hullShade)"/>
+  <!-- 驾驶舱底色 -->
+  <path d="M758 326 C 804 298, 866 302, 902 344 L 904 372 L 760 380 Z" fill="#cfdae4" opacity="0.45"/>
+
+  <!-- 猴子 -->
+  <g>
+    <ellipse cx="840" cy="394" rx="33" ry="29" fill="url(#fur)"/>
+    <g>
+      <path d="M814 400 C 790 408, 776 428, 782 446" fill="none" stroke="#7d4a2c" stroke-width="10" stroke-linecap="round"/>
+      <path d="M814 400 C 790 408, 776 428, 782 446" fill="none" stroke="#8a5533" stroke-width="6" stroke-linecap="round"/>
+      <animateTransform attributeName="transform" type="rotate" dur="1.7s" repeatCount="indefinite"
+        values="-7 814 400;7 814 400;-7 814 400" data-base="1.7"/>
+    </g>
+    <path d="M820 382 C 808 390, 798 396, 790 400" fill="none" stroke="#8a5533" stroke-width="11" stroke-linecap="round"/>
+    <path d="M862 380 C 870 387, 876 392, 882 395" fill="none" stroke="#8a5533" stroke-width="11" stroke-linecap="round"/>
+    <g>
+      <circle cx="819" cy="318" r="10.5" fill="url(#fur)"/><circle cx="862" cy="318" r="10.5" fill="url(#fur)"/>
+      <circle cx="819" cy="318" r="5.2" fill="#d9a878"/><circle cx="862" cy="318" r="5.2" fill="#d9a878"/>
+      <circle cx="841" cy="325" r="24" fill="url(#fur)"/>
+      <ellipse cx="841" cy="332" rx="17" ry="14" fill="#e9c9a4"/>
+      <circle cx="833" cy="321" r="4" fill="#231a14"/><circle cx="849" cy="321" r="4" fill="#231a14"/>
+      <circle cx="834.3" cy="319.6" r="1.4" fill="#fff"/><circle cx="850.3" cy="319.6" r="1.4" fill="#fff"/>
+      <ellipse cx="841" cy="331" rx="4.8" ry="3.4" fill="#7d4a2c"/>
+      <path d="M833 340 Q 841 346 850 339" fill="none" stroke="#7d4a2c" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M821 306 Q 841 285 862 306 Z" fill="#2f6fb0"/>
+      <path d="M816 307 Q 841 297 866 307 L 866 312 Q 841 304 816 312 Z" fill="#25578c"/>
+      <animateTransform attributeName="transform" type="rotate" dur="3.4s" repeatCount="indefinite"
+        values="-2.5 841 340;2.5 841 340;-2.5 841 340" data-base="3.4"/>
+    </g>
+  </g>
+
+  <!-- 玻璃罩 -->
+  <path d="M758 324 C 804 296, 868 300, 903 344 L 906 366 L 760 380 Z"
+        fill="url(#glass)" stroke="#9fb6c6" stroke-width="2.5"/>
+  <path d="M776 330 C 796 316, 812 312, 822 310" fill="none" stroke="#ffffff" stroke-width="6"
+        stroke-linecap="round" opacity="0.65"/>
+
+  <!-- 螺旋桨 -->
+  <g opacity="0.22"><circle cx="947" cy="372" r="66" fill="#dfe9f2"/></g>
+  <g>
+    <g fill="#e2574c" stroke="#b23b30" stroke-width="2">
+      <path d="M947 372 C 938 340, 942 314, 947 310 C 952 314, 956 340, 947 372 Z"/>
+      <path d="M947 372 C 979 363, 1005 367, 1009 372 C 1005 377, 979 381, 947 372 Z"/>
+      <path d="M947 372 C 956 404, 952 430, 947 434 C 942 430, 938 404, 947 372 Z"/>
+    </g>
+    <circle cx="947" cy="372" r="7" fill="#5d7183"/>
+    <animateTransform attributeName="transform" type="rotate" dur="0.06s" repeatCount="indefinite"
+      values="0 947 372;360 947 372" data-base="0.06"/>
+  </g>
+
+  <!-- ============ 机顶货架（自行车停放平台） ============ -->
+  <g>
+    <rect x="512" y="300" width="176" height="13" rx="6" fill="#8fa3b4"/>
+    <rect x="512" y="300" width="176" height="4" rx="2" fill="#a9b8c6"/>
+    <path d="M540 313 L 538 322" stroke="#7e93a5" stroke-width="7" stroke-linecap="round" fill="none"/>
+    <path d="M662 313 L 664 320" stroke="#7e93a5" stroke-width="7" stroke-linecap="round" fill="none"/>
+  </g>
+
+  <!-- ============ 自行车 + 鹈鹕（局部坐标，缩放后放到机顶货架上） ============ -->
+  <g transform="translate(242.0,302.0) scale(0.620)">
+
+    <!-- 车轮 -->
+    <g>
+      <use href="#wheel" x="440" y="-113" width="120" height="120"/>
+      <animateTransform attributeName="transform" type="rotate" dur="1.2s" repeatCount="indefinite"
+        values="0 500 -53;360 500 -53" data-base="1.2"/>
+    </g>
+    <g>
+      <use href="#wheel" x="590" y="-113" width="120" height="120"/>
+      <animateTransform attributeName="transform" type="rotate" dur="1.2s" repeatCount="indefinite"
+        values="0 650 -53;360 650 -53" data-base="1.2"/>
+    </g>
+
+    <!-- 远侧腿（在后） -->
+    <g fill="none" stroke="#d98a2c" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 541 -159 L 541 -159 L 541 -159">
+        <animate attributeName="d" dur="1.2s" repeatCount="indefinite" calcMode="linear"
+          values="M 541.0 -159.0 L 562.4 -100.3 L 558.0 -38.0;M 541.0 -159.0 L 563.3 -104.1 L 559.9 -45.0;M 541.0 -159.0 L 565.7 -107.4 L 565.0 -50.1;M 541.0 -159.0 L 569.0 -109.1 L 572.0 -52.0;M 541.0 -159.0 L 572.3 -108.8 L 579.0 -50.1;M 541.0 -159.0 L 574.7 -106.6 L 584.1 -45.0;M 541.0 -159.0 L 575.7 -103.0 L 586.0 -38.0;M 541.0 -159.0 L 574.9 -99.2 L 584.1 -31.0;M 541.0 -159.0 L 572.5 -96.0 L 579.0 -25.9;M 541.0 -159.0 L 569.2 -94.4 L 572.0 -24.0;M 541.0 -159.0 L 565.8 -94.7 L 565.0 -25.9;M 541.0 -159.0 L 563.3 -96.9 L 559.9 -31.0" data-base="1.2"/>
+      </path>
+    </g>
+    <ellipse rx="10" ry="4.4" fill="#d98a2c">
+      <animate attributeName="cx" dur="1.2s" repeatCount="indefinite" values="558.0;559.9;565.0;572.0;579.0;584.1;586.0;584.1;579.0;572.0;565.0;559.9" data-base="1.2"/>
+      <animate attributeName="cy" dur="1.2s" repeatCount="indefinite" values="-38.0;-45.0;-50.1;-52.0;-50.1;-45.0;-38.0;-31.0;-25.9;-24.0;-25.9;-31.0" data-base="1.2"/>
+    </ellipse>
+
+    <!-- 车架 -->
+    <g fill="none" stroke="#d94b3f" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M572 -38 L546 -152"/><path d="M572 -38 L500 -53"/>
+      <path d="M500 -53 L546 -150"/><path d="M546 -150 L652 -104"/>
+      <path d="M652 -104 L572 -38"/><path d="M652 -104 L650 -53"/>
+    </g>
+    <g fill="none" stroke="#f4776c" stroke-width="3" stroke-linecap="round" opacity="0.85">
+      <path d="M572 -38 L546 -152"/><path d="M546 -150 L652 -104"/>
+    </g>
+    <!-- 链条 -->
+    <path d="M572 -38 L500 -53" stroke="#5d7183" stroke-width="3" stroke-dasharray="5 4" fill="none"/>
+    <!-- 车座 -->
+    <path d="M532 -158 Q 546 -166 560 -158 L 558 -150 L 534 -150 Z" fill="#3d4a58"/>
+    <!-- 车把 -->
+    <g stroke="#3d4a58" stroke-width="6.5" stroke-linecap="round" fill="none">
+      <path d="M652 -104 L658 -126"/><path d="M622 -128 L692 -128"/>
+    </g>
+    <path d="M684 -128 L700 -128" stroke="#6b7b8b" stroke-width="8" stroke-linecap="round" fill="none"/>
+
+    <!-- 牙盘 + 曲柄 + 踏板 -->
+    <g>
+      <circle cx="572" cy="-38" r="17" fill="none" stroke="#5d7183" stroke-width="3.5"/>
+      <path d="M572 -38 L586 -38" stroke="#5d7183" stroke-width="7" stroke-linecap="round"/>
+      <path d="M572 -38 L558 -38" stroke="#5d7183" stroke-width="7" stroke-linecap="round"/>
+      <rect x="579" y="-42" width="18" height="8" rx="3" fill="#3d4a58"/>
+      <rect x="551" y="-42" width="18" height="8" rx="3" fill="#3d4a58"/>
+      <circle cx="572" cy="-38" r="7" fill="#8fa3b4"/>
+      <animateTransform attributeName="transform" type="rotate" dur="1.2s" repeatCount="indefinite"
+        values="0 572 -38;360 572 -38" data-base="1.2"/>
+    </g>
+
+    <!-- 近侧腿（在前） -->
+    <g fill="none" stroke="#f2a03d" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 546 -162 L 546 -162 L 546 -162">
+        <animate attributeName="d" dur="1.2s" repeatCount="indefinite" calcMode="linear"
+          values="M 546.0 -162.0 L 578.4 -104.0 L 586.0 -38.0;M 546.0 -162.0 L 577.5 -100.1 L 584.1 -31.0;M 546.0 -162.0 L 575.1 -97.0 L 579.0 -25.9;M 546.0 -162.0 L 571.8 -95.4 L 572.0 -24.0;M 546.0 -162.0 L 568.4 -95.7 L 565.0 -25.9;M 546.0 -162.0 L 565.9 -97.9 L 559.9 -31.0;M 546.0 -162.0 L 564.9 -101.3 L 558.0 -38.0;M 546.0 -162.0 L 565.8 -105.0 L 559.9 -45.0;M 546.0 -162.0 L 568.3 -108.2 L 565.0 -50.1;M 546.0 -162.0 L 571.7 -110.0 L 572.0 -52.0;M 546.0 -162.0 L 575.0 -109.7 L 579.0 -50.1;M 546.0 -162.0 L 577.4 -107.5 L 584.1 -45.0" data-base="1.2"/>
+      </path>
+    </g>
+    <circle r="5.6" fill="#f7b45c">
+      <animate attributeName="cx" dur="1.2s" repeatCount="indefinite" values="578.4;577.5;575.1;571.8;568.4;565.9;564.9;565.8;568.3;571.7;575.0;577.4" data-base="1.2"/>
+      <animate attributeName="cy" dur="1.2s" repeatCount="indefinite" values="-104.0;-100.1;-97.0;-95.4;-95.7;-97.9;-101.3;-105.0;-108.2;-110.0;-109.7;-107.5" data-base="1.2"/>
+    </circle>
+    <ellipse rx="11.5" ry="4.8" fill="#f7b45c">
+      <animate attributeName="cx" dur="1.2s" repeatCount="indefinite" values="586.0;584.1;579.0;572.0;565.0;559.9;558.0;559.9;565.0;572.0;579.0;584.1" data-base="1.2"/>
+      <animate attributeName="cy" dur="1.2s" repeatCount="indefinite" values="-38.0;-31.0;-25.9;-24.0;-25.9;-31.0;-38.0;-45.0;-50.1;-52.0;-50.1;-45.0" data-base="1.2"/>
+    </ellipse>
+
+    <!-- ===== 鹈鹕 ===== -->
+    <g>
+      <!-- 尾羽 -->
+      <path d="M512 -196 L466 -214 L472 -166 L508 -176 Z" fill="#e7edf3" stroke="#9fb0c0" stroke-width="2"/>
+      <!-- 身体 -->
+      <ellipse cx="540" cy="-196" rx="46" ry="33" fill="url(#bodyG)" stroke="#9fb0c0" stroke-width="2.2"/>
+      <!-- 远侧翅 -->
+      <path d="M508 -208 C 490 -196, 490 -172, 508 -162 C 526 -152, 550 -160, 554 -178 C 548 -198, 526 -214, 508 -208 Z"
+            fill="#d3dce5" stroke="#9fb0c0" stroke-width="2"/>
+      <!-- 脖子 -->
+      <path d="M566 -208 C 580 -222, 584 -238, 588 -250" fill="none" stroke="#fbfdfe" stroke-width="22" stroke-linecap="round"/>
+      <path d="M566 -208 C 580 -222, 584 -238, 588 -250" fill="none" stroke="#dde5ec" stroke-width="22" stroke-linecap="round" opacity="0.32"/>
+      <!-- 头 -->
+      <circle cx="592" cy="-258" r="20" fill="url(#bodyG)" stroke="#9fb0c0" stroke-width="2.2"/>
+      <!-- 喙上 -->
+      <path d="M608 -266 C 644 -272, 686 -262, 716 -250 C 692 -240, 650 -242, 611 -248 Z"
+            fill="url(#beakTop)" stroke="#cf7418" stroke-width="2"/>
+      <!-- 喉袋（会张合） -->
+      <g class="beak-low">
+        <path d="M611 -248 C 650 -242, 690 -240, 712 -248 C 704 -226, 670 -212, 640 -216 C 620 -219, 606 -234, 611 -248 Z"
+              fill="url(#beakLow)" stroke="#c4631a" stroke-width="2"/>
+        <animateTransform id="honkBeak" attributeName="transform" type="rotate" dur="0.42s" begin="indefinite"
+          values="0 611 -248;12 611 -248;0 611 -248" repeatCount="2" fill="remove" data-base="0.42"/>
+      </g>
+      <!-- 眼 -->
+      <circle cx="586" cy="-264" r="4.2" fill="#231a14"/>
+      <circle cx="587.3" cy="-265.2" r="1.5" fill="#fff"/>
+      <path d="M577 -273 Q 586 -278 595 -273" fill="none" stroke="#b7c4d0" stroke-width="2.4" stroke-linecap="round"/>
+      <!-- 髋部 -->
+      <circle cx="546" cy="-162" r="15" fill="#f2f6fa" stroke="#9fb0c0" stroke-width="2"/>
+      <!-- 近侧扇动翅 -->
+      <g>
+        <path d="M506 -210 C 476 -198, 472 -166, 498 -152 C 524 -138, 550 -152, 554 -176 C 548 -198, 526 -216, 506 -210 Z"
+              fill="url(#bodyG)" stroke="#9fb0c0" stroke-width="2.2"/>
+        <path d="M512 -188 C 502 -178, 502 -164, 510 -156" fill="none" stroke="#d5dee6" stroke-width="3" stroke-linecap="round"/>
+        <animateTransform attributeName="transform" type="rotate" dur="0.9s" repeatCount="indefinite"
+          values="-8 506 -210;8 506 -210;-8 506 -210" data-base="0.9"/>
+      </g>
+      <!-- 搭车把的前翅 -->
+      <path d="M562 -206 C 600 -204, 646 -176, 672 -134" fill="none" stroke="#fbfdfe" stroke-width="13" stroke-linecap="round"/>
+      <path d="M562 -206 C 600 -204, 646 -176, 672 -134" fill="none" stroke="#e2e9f0" stroke-width="13" stroke-linecap="round" opacity="0.4"/>
+      <circle cx="676" cy="-130" r="9" fill="#fbfdfe" stroke="#9fb0c0" stroke-width="2"/>
+      <!-- 随踩踏起伏 -->
+      <animateTransform attributeName="transform" type="rotate" dur="1.2s" repeatCount="indefinite"
+        values="-2 546 -162;2 546 -162;-2 546 -162" data-base="1.2"/>
+    </g>
+  </g>
+
+  <!-- 鸣笛声波 -->
+  <g class="honk" opacity="0">
+    <animate id="honkFade" attributeName="opacity" dur="0.9s" begin="indefinite" fill="remove"
+      values="0;1;1;0" keyTimes="0;0.25;0.6;1" data-base="0.9"/>
+    <path d="M866 84 A 26 26 0 0 1 866 108" fill="none" stroke="#ffd76a" stroke-width="4" stroke-linecap="round"/>
+    <path d="M884 72 A 44 44 0 0 1 884 120" fill="none" stroke="#ffd76a" stroke-width="4" stroke-linecap="round"/>
+    <path d="M902 60 A 62 62 0 0 1 902 132" fill="none" stroke="#ffd76a" stroke-width="4" stroke-linecap="round"/>
+  </g>
+ </g>
+</g>
+
+<g class="drift-near" opacity="0.8"><g class="band-a"><use href="#cloud" x="961" y="536" width="500" height="200"/><use href="#cloud" x="2299" y="536" width="440" height="176"/><use href="#cloud" x="503" y="544" width="512" height="205"/></g><g class="band-b"><use href="#cloud" x="961" y="536" width="500" height="200"/><use href="#cloud" x="2299" y="536" width="440" height="176"/><use href="#cloud" x="503" y="544" width="512" height="205"/></g></g>
+</svg></div>
+  <div class="bar">
+    <button id="btnFast" class="primary">&#9889; &#21152;&#36895;</button>
+    <button id="btnSlow">&#128263; &#26242;&#36895;</button>
+    <button id="btnReset">&#8635; &#26321;&#20301;</button>
+    <button id="btnHonk">&#128266; &#40490;&#40406;&#21548;</button>
+    <span class="speed">&#39134;&#34892;&#36895;&#24230; <b id="spv">1.00x</b></span>
+  </div>
+  <div class="hint">&#28857;&#20987;&#30011;&#38754;&#21487;&#39548;&#21516; &#128266; &middot; &#40644;&#40456;&#31995;&#32479;&#24050;&#35821;&#21475;</div>
+</div>
+<script>
+function setSpeed(v){
+  v = Math.max(0.25, Math.min(2.2, v));
+  document.documentElement.style.setProperty('--sp', v);
+  var l = document.querySelectorAll('#scene animate, #scene animateTransform');
+  for (var i=0;i<l.length;i++){
+    var b = parseFloat(l[i].getAttribute('data-base') || '1');
+    l[i].setAttribute('dur', (b/v).toFixed(3)+'s');
+  }
+  document.getElementById('spv').textContent = v.toFixed(2)+'x';
+}
+var sp = 1;
+document.getElementById('btnFast').onclick = function(){ sp = Math.min(2.2, sp+0.25); setSpeed(sp); };
+document.getElementById('btnSlow').onclick = function(){ sp = Math.max(0.25, sp-0.25); setSpeed(sp); };
+document.getElementById('btnReset').onclick = function(){ sp = 1; setSpeed(sp); };
+document.getElementById('btnHonk').onclick = function(){
+  document.getElementById('honkFade').beginElement();
+  document.getElementById('honkBeak').beginElement();
+};
+document.getElementById('scene').addEventListener('click', function(){
+  document.getElementById('btnHonk').click();
+});
+setSpeed(1);
+</script>
+</body>
+</html>
