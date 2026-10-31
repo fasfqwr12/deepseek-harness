@@ -12,7 +12,7 @@
 import { memo, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import type { AssistantBlock } from '@deepseek-ai/dsh-client-runtime/client'
-import { JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownFileMentions } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery, type ImageLoader, type ImageReleaser } from '@deepseek-ai/dsh-client-ui-attachment'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
@@ -37,6 +37,14 @@ export interface AssistantMarkdownProps {
   t: ChatViewSlotProps['t']
 }
 
+/**
+ * Leaked tool-call special tokens (fullwidth U+FF5C brackets or the ASCII `<|`
+ * family) in a text body: rendered as raw code, never markdown. The markdown
+ * pipeline eats `<>` markup and typesets paired `$` as KaTeX math, which
+ * shreds the transcript into pseudo-formulas.
+ */
+const LEAKED_TOOL_SYNTAX = /<\uFF5C|\uFF5CDSML\uFF5C|<\|/
+
 /** Reasoning block as the Think variant summary row (figma 39:28304). */
 export const AssistantMarkdown = memo(function AssistantMarkdown({
   blocks, streaming, interrupted, thinkCollapsed, loadImage, releaseImage, mentions, t,
@@ -59,6 +67,20 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
     if (block === undefined) continue
     switch (block.kind) {
       case 'text':
+        // Leaked tool-call syntax goes through CodeBlock verbatim; markdown
+        // would shred it (see LEAKED_TOOL_SYNTAX above).
+        if (LEAKED_TOOL_SYNTAX.test(block.text)) {
+          rendered.push(
+            <CodeBlock
+              key={i}
+              code={block.text}
+              lang="text"
+              copyLabel={t('copy')}
+              copiedLabel={t('copied')}
+            />,
+          )
+          break
+        }
         rendered.push(
           <MarkdownText
             key={i}
